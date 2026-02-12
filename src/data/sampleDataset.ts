@@ -216,7 +216,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-rfid-1",
       title: "JSY M 4TA MTCH UCL LAMINE 25/26",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-rfid-1",
@@ -236,7 +236,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-rfid-2",
       title: "JSY M GK VIOLET UCL 25/26",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-rfid-2",
@@ -256,7 +256,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-rfid-3",
       title: "JSY W HM UCL 25/26",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-rfid-3",
@@ -276,7 +276,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-rfid-4",
       title: "JSY Y AW MTCH UCL 25/26",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-rfid-4",
@@ -296,7 +296,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-rfid-5",
       title: "JSY Y HM UCL 25/26",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-rfid-5",
@@ -316,7 +316,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-nr-1-inventory",
       title: "BUFANDA TELAR HOME 25_26",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-nr-1-inventory",
@@ -331,7 +331,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-nr-2-inventory",
       title: "CLAUER XARXA PORTERIA",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-nr-2-inventory",
@@ -346,7 +346,7 @@ export const sampleDataset: SampleDataset = {
     {
       id: "prod-sku-nr-3",
       title: "IMAN ESCUDO DORADO PURPURINA",
-      brand: "Barca Official Store Spotify Camp Nou",
+      brand: "Retail Demo Store",
       variants: [
         {
           id: "var-nr-3",

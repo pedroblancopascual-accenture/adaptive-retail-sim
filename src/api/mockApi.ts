@@ -74,9 +74,9 @@ export interface MinMaxRuleTemplate {
 }
 
 const flowEvents: FlowEvent[] = [];
-const LOCATIONS_SETUP_STORAGE_KEY = "blm-sim:locations-setup:v1";
+const LOCATIONS_SETUP_STORAGE_KEY = "adaptive-sim:locations-setup:v1";
 const DEFAULT_EXTERNAL_RECEIVING_LOCATIONS: Array<{ id: string; name: string }> = [
-  { id: "external-esbo", name: "ESBO" }
+  { id: "external-esbo", name: "External Warehouse" }
 ];
 let externalReceivingLocations = [...DEFAULT_EXTERNAL_RECEIVING_LOCATIONS];
 

@@ -4,8 +4,9 @@ type Dict = Record<string, string>;
 
 const translations: Record<Lang, Dict> = {
   ca: {
-    appEyebrow: "Adaptative SIM for BLM",
-    appTitle: "Adaptative SIM for BLM",
+    appEyebrow: "Adaptive SIM for Retailers",
+    appTitle: "Adaptive SIM for Retailers",
+    legalDisclaimer: "Aquesta aplicacio es una demo il.lustrativa amb dades simulades; no es un sistema productiu ni garantia operativa.",
     rules: "Regles Min-Max",
     staff: "Personal",
     catalog: "Cataleg",
@@ -209,8 +210,9 @@ const translations: Record<Lang, Dict> = {
     unitsSuffix: "u"
   },
   es: {
-    appEyebrow: "Adaptative SIM for BLM",
-    appTitle: "Adaptative SIM for BLM",
+    appEyebrow: "Adaptive SIM for Retailers",
+    appTitle: "Adaptive SIM for Retailers",
+    legalDisclaimer: "Esta aplicacion es una demo ilustrativa con datos simulados; no es un sistema productivo ni una garantia operativa.",
     rules: "Reglas Min-Max",
     staff: "Staff",
     catalog: "Catalogo",
@@ -414,8 +416,9 @@ const translations: Record<Lang, Dict> = {
     unitsSuffix: "u"
   },
   en: {
-    appEyebrow: "Adaptative SIM for BLM",
-    appTitle: "Adaptative SIM for BLM",
+    appEyebrow: "Adaptive SIM for Retailers",
+    appTitle: "Adaptive SIM for Retailers",
+    legalDisclaimer: "This application is an illustrative demo using simulated data; it is not a production system or an operational guarantee.",
     rules: "Min-Max Rules",
     staff: "Staff",
     catalog: "Catalog",

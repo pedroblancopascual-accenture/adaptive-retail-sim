@@ -9,6 +9,8 @@ Frontend PoC built with React + TypeScript to simulate store operations:
 - catalog and analytics views
 - min-max rules (global + location-specific)
 
+In this project, `SIM` refers to **Store Inventory Management**.
+
 Note: this repository uses anonymized naming and mock data for demonstration purposes.
 
 ## Tech stack

@@ -2275,6 +2275,9 @@ export default function App() {
           </div>
         </div>
       </header>
+      <p className="footer-note">
+        <span>{t(lang, "legalDisclaimer")}</span>
+      </p>
 
       <section className="kpi-grid">
         <article className="kpi-card"><span>{t(lang, "zones")}</span><strong>{totals.zones}</strong></article>
