@@ -1,4 +1,4 @@
-# Adaptive Store Inventory Simulator (PoC)
+# Adaptive Store Inventory Management (PoC)
 
 Frontend PoC built with React + TypeScript to simulate store operations:
 - location/zones management on shopfloor map
