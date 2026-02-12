@@ -1,27 +1,54 @@
-# blm-sim
+# Adaptive Store Inventory Simulator (PoC)
 
-React + TypeScript PoC for Store Inventory Management (SIM).
+Frontend PoC built with React + TypeScript to simulate store operations:
+- location/zones management on shopfloor map
+- RFID and non-RFID inventory flows
+- replenishment and receiving task lifecycle
+- staff assignment and execution workflow
+- sales carts and checkout simulation
+- catalog and analytics views
+- min-max rules (global + location-specific)
 
-## Run
+Note: this repository uses anonymized naming and mock data for demonstration purposes.
+
+## Tech stack
+
+- React
+- TypeScript
+- Vite
+
+## Run locally
 
 ```bash
-cd blm-sim
 npm install
 npm run dev
 ```
 
-## Artifacts
+App default URL: `http://localhost:5174`
 
-- Domain model: `src/domain/models.ts`
-- Inventory calculation logic: `src/logic/inventoryEngine.ts` and `src/docs/inventory-pseudocode.md`
-- REST API design and mock implementation: `src/api/mockApi.ts` and `src/docs/rest-api.json`
-- Database tables: `src/docs/database-schema.sql`
-- Sample dataset: `src/data/sampleDataset.ts` and `src/docs/sample-dataset.json`
-- Frontend data contracts: `src/domain/contracts.ts` and `src/docs/frontend-contracts.json`
-- Execution notes: `src/docs/execution-notes.md`
+## Build
 
-## Demo behavior
+```bash
+npm run build
+npm run preview
+```
 
-- Loads required dataset (3 zones, 6 antennas, 5 SKUs, 10 EPCs, 2 rules, 8 RFID reads, 4 sales events).
-- Generates one replenishment alert for `SKU-NR-1` in `zone-shelf-a`.
-- "Confirm First Open Task" closes that task and recalculates inventory.
+## Project structure
+
+- App shell and UI: `src/App.tsx`
+- Main styles: `src/styles.css`
+- Mock API and business simulation: `src/api/mockApi.ts`
+- Inventory engine: `src/logic/inventoryEngine.ts`
+- Domain models/contracts: `src/domain/models.ts`, `src/domain/contracts.ts`
+- Initial mock dataset: `src/data/sampleDataset.ts`
+- Documentation and reference artifacts: `src/docs/`
+
+## Deployment
+
+For Render Static Site:
+- Build Command: `npm ci && npm run build`
+- Publish Directory: `dist`
+
+## License
+
+Private/internal PoC.
