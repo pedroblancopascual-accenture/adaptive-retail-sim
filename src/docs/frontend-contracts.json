@@ -1,0 +1,59 @@
+{
+  "zoneInventoryDashboard": {
+    "asOf": "string",
+    "zones": [
+      {
+        "zoneId": "string",
+        "zoneName": "string",
+        "lowStockCount": 0,
+        "openTaskCount": 0,
+        "inventory": [
+          {
+            "skuId": "string",
+            "qty": 0,
+            "source": "RFID|NON_RFID",
+            "confidence": 0.0
+          }
+        ]
+      }
+    ]
+  },
+  "zoneDetailView": {
+    "zone": {
+      "zoneId": "string",
+      "name": "string",
+      "mapPolygon": [
+        { "x": 0, "y": 0 }
+      ],
+      "antennas": [
+        {
+          "antennaId": "string",
+          "name": "string",
+          "isActive": true
+        }
+      ]
+    },
+    "asOf": "string",
+    "inventory": [
+      {
+        "skuId": "string",
+        "qty": 0,
+        "source": "RFID|NON_RFID",
+        "confidence": 0.0,
+        "lastCalculatedAt": "string"
+      }
+    ],
+    "recentRFIDReads": [],
+    "openTasks": []
+  },
+  "replenishmentTaskList": {
+    "filters": {
+      "zoneId": "string|null",
+      "status": "OPEN|IN_PROGRESS|COMPLETED|CANCELLED|null"
+    },
+    "tasks": [],
+    "page": 1,
+    "pageSize": 50,
+    "total": 0
+  }
+}

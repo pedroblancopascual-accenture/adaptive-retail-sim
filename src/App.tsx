@@ -1,0 +1,4036 @@
+import {
+  Fragment,
+  type DragEvent as ReactDragEvent,
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
+import { api, type MinMaxRuleTemplate } from "./api/mockApi";
+import { sampleDataset } from "./data/sampleDataset";
+import type { InventorySource } from "./domain/models";
+import { LANG_FLAGS, LANG_LABELS, type Lang, t } from "./i18n";
+
+type InventoryZoneId = string;
+type ZoneDrawerSection = "inventory" | "settings" | "rules" | "tasks";
+type ZoneScope = InventoryZoneId | "all";
+type MainContentView = "map" | "staff" | "catalog" | "analytics" | "tasks" | "rules";
+type TaskTypeValue = "REPLENISHMENT" | "RECEIVING";
+type TaskStatusValue = "CREATED" | "ASSIGNED" | "IN_PROGRESS" | "IN_TRANSIT" | "CONFIRMED" | "REJECTED";
+type TaskHubFilterKey = "TYPE" | "DESTINATION" | "STATUS";
+type CatalogSourceFilterValue = "RFID" | "NON_RFID";
+type CatalogKitValue = "home" | "away" | "third" | "forth";
+type CatalogAgeGroupValue = "adults" | "youth" | "kids" | "baby";
+type CatalogGenderValue = "women" | "men" | "unisex";
+type CatalogRoleValue = "player" | "goalkeeper" | "staff";
+type CatalogQualityValue = "match" | "stadium";
+type CatalogFilterKey = "SOURCE" | "KIT" | "AGE_GROUP" | "GENDER" | "ROLE" | "QUALITY";
+type RuleTemplateSelectorMode = "SKU" | "ATTRIBUTES";
+const SHOPFLOOR_SIZE = { width: 1536, height: 1117 };
+const AUTO_SWEEP_INTERVAL_SEC = 30;
+const ALL_LOCATIONS_OPTION_ID = "__all_locations__";
+const ALL_SKUS = sampleDataset.skus;
+const SKU_SOURCE_BY_ID = new Map(ALL_SKUS.map((sku) => [sku.id, sku.source]));
+
+function polygonToPoints(points: Array<{ x: number; y: number }>): string {
+  return points.map((p) => `${p.x},${p.y}`).join(" ");
+}
+
+function shortZone(zoneId: string): string {
+  return zoneId.replace("zone-", "").replace(/-/g, " ");
+}
+
+function polygonCenter(points: Array<{ x: number; y: number }>): { x: number; y: number } {
+  if (points.length === 0) return { x: 0, y: 0 };
+  const sum = points.reduce(
+    (acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }),
+    { x: 0, y: 0 }
+  );
+  return { x: sum.x / points.length, y: sum.y / points.length };
+}
+
+function getCartItemState(source: string, qty: number, pickedConfirmedQty: number): "IN_CART" | "PARTIAL_PICK" | "PICK_CONFIRMED" {
+  if (source !== "RFID") return "IN_CART";
+  if (pickedConfirmedQty <= 0) return "IN_CART";
+  if (pickedConfirmedQty < qty) return "PARTIAL_PICK";
+  return "PICK_CONFIRMED";
+}
+
+function toTimestampMs(value?: string): number | null {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toDurationLabel(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "-";
+  const rounded = Math.round(totalSeconds);
+  const h = Math.floor(rounded / 3600);
+  const m = Math.floor((rounded % 3600) / 60);
+  const s = rounded % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+export default function App() {
+  const [lang, setLang] = useState<Lang>(() => {
+    const stored = localStorage.getItem("sim-lang");
+    return stored === "en" || stored === "es" || stored === "ca" ? stored : "ca";
+  });
+  const [selectedZone, setSelectedZone] = useState<ZoneScope>("all");
+  const [dashboard, setDashboard] = useState(api.getInventoryZones());
+  const [locations, setLocations] = useState(api.getLocations());
+  const [staff, setStaff] = useState(api.getStaff());
+  const [tasks, setTasks] = useState(api.getReplenishmentTasks());
+  const [catalogEntries, setCatalogEntries] = useState<ReturnType<typeof api.getCatalog>>(api.getCatalog());
+  const [zoneDetail, setZoneDetail] = useState<ReturnType<typeof api.getInventoryZoneById>>(null);
+  const [rules, setRules] = useState(api.getRules());
+  const [ruleTemplates, setRuleTemplates] = useState(api.getMinMaxRuleTemplates());
+  const [flow, setFlow] = useState(api.getFlowEvents());
+  const [taskAudit, setTaskAudit] = useState(api.getTaskAudit());
+  const [customers, setCustomers] = useState(api.getCustomers());
+  const [selectedCustomerId, setSelectedCustomerId] = useState(api.getCustomers()[0]?.id ?? "cust-001");
+  const [customerBasket, setCustomerBasket] = useState(api.getCustomerBasket(api.getCustomers()[0]?.id ?? "cust-001"));
+  const [showZoneDrawer, setShowZoneDrawer] = useState(false);
+  const [zoneDrawerSection, setZoneDrawerSection] = useState<ZoneDrawerSection>("inventory");
+  const [mainContentView, setMainContentView] = useState<MainContentView>("map");
+  const [receivingOrders, setReceivingOrders] = useState(api.getReceivingOrders());
+  const [receivingLocations, setReceivingLocations] = useState(api.getReceivingLocations());
+  const [showSalesDrawer, setShowSalesDrawer] = useState(false);
+  const [showRfidDrawer, setShowRfidDrawer] = useState(false);
+  const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+  const [taskSourceById, setTaskSourceById] = useState<Record<string, string>>({});
+  const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
+  const [mapEditMode, setMapEditMode] = useState(false);
+  const [showMapZones, setShowMapZones] = useState(true);
+  const [mapZoom, setMapZoom] = useState(1);
+  const [mapPan, setMapPan] = useState({ x: 0, y: 0 });
+  const [isMapPanning, setIsMapPanning] = useState(false);
+  const [mapPanStart, setMapPanStart] = useState<{ x: number; y: number; originX: number; originY: number } | null>(null);
+  const [createMode, setCreateMode] = useState(false);
+  const [draftPolygon, setDraftPolygon] = useState<Array<{ x: number; y: number }>>([]);
+  const [newZonePolygon, setNewZonePolygon] = useState<Array<{ x: number; y: number }>>([]);
+  const [newZoneForm, setNewZoneForm] = useState({
+    zoneId: "zone-new",
+    name: "New Zone",
+    color: "#a855f7",
+    locationType: "sales" as "sales" | "warehouse" | "external"
+  });
+  const [dragVertexIndex, setDragVertexIndex] = useState<number | null>(null);
+  const [dragTarget, setDragTarget] = useState<"existing" | "new" | null>(null);
+  const [isDraggingVertex, setIsDraggingVertex] = useState(false);
+  const [dragPolygonStart, setDragPolygonStart] = useState<{ x: number; y: number } | null>(null);
+  const [rfidCatalog] = useState(api.getRfidCatalog());
+  const [rfidForm, setRfidForm] = useState(() => ({
+    epc: api.getRfidCatalog().epcMappings[0]?.epc ?? "",
+    antennaId: api.getRfidCatalog().antennas[0]?.id ?? "",
+    rssi: -54
+  }));
+  const [rfidSweepZoneId, setRfidSweepZoneId] = useState<InventoryZoneId>(() => api.getLocations()[0]?.id ?? "zone-shelf-a");
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const mapViewportRef = useRef<HTMLDivElement | null>(null);
+  const suppressMapClickRef = useRef(false);
+  const headerMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const [ruleForm, setRuleForm] = useState<{
+    skuId: string;
+    source: InventorySource;
+    minQty: number;
+    maxQty: number;
+  }>({
+    skuId: "SKU-NR-1",
+    source: "NON_RFID" as InventorySource,
+    minQty: 2,
+    maxQty: 8
+  });
+
+  const [saleForm, setSaleForm] = useState({
+    skuId: "SKU-NR-1",
+    qty: 1
+  });
+  const [saleZoneId, setSaleZoneId] = useState<InventoryZoneId>("zone-shelf-a");
+  const [zoneEditForm, setZoneEditForm] = useState({
+    name: "",
+    color: "#3b82f6",
+    isSalesLocation: true
+  });
+  const [previewZoneColor, setPreviewZoneColor] = useState<string | null>(null);
+  const [hoverZoneId, setHoverZoneId] = useState<InventoryZoneId | null>(null);
+  const [sourceEditor, setSourceEditor] = useState<Array<{ sourceZoneId: string; sortOrder: number }>>([]);
+  const [salesStatusMessage, setSalesStatusMessage] = useState("");
+  const [receivingStatusMessage, setReceivingStatusMessage] = useState("");
+  const [autoSweepEnabled, setAutoSweepEnabled] = useState(true);
+  const [autoSweepRemainingSec, setAutoSweepRemainingSec] = useState(AUTO_SWEEP_INTERVAL_SEC);
+  const [taskHubTypeFilters, setTaskHubTypeFilters] = useState<TaskTypeValue[]>([]);
+  const [taskHubLocationFilters, setTaskHubLocationFilters] = useState<string[]>([]);
+  const [taskHubStatusFilters, setTaskHubStatusFilters] = useState<TaskStatusValue[]>([]);
+  const [taskHubPendingFilterKey, setTaskHubPendingFilterKey] = useState<TaskHubFilterKey | "">("");
+  const [taskHubFilterSearch, setTaskHubFilterSearch] = useState("");
+  const [catalogSourceFilters, setCatalogSourceFilters] = useState<CatalogSourceFilterValue[]>([]);
+  const [catalogKitFilters, setCatalogKitFilters] = useState<CatalogKitValue[]>([]);
+  const [catalogAgeGroupFilters, setCatalogAgeGroupFilters] = useState<CatalogAgeGroupValue[]>([]);
+  const [catalogGenderFilters, setCatalogGenderFilters] = useState<CatalogGenderValue[]>([]);
+  const [catalogRoleFilters, setCatalogRoleFilters] = useState<CatalogRoleValue[]>([]);
+  const [catalogQualityFilters, setCatalogQualityFilters] = useState<CatalogQualityValue[]>([]);
+  const [catalogPendingFilterKey, setCatalogPendingFilterKey] = useState<CatalogFilterKey | "">("");
+  const [catalogFilterSearch, setCatalogFilterSearch] = useState("");
+  const [catalogMapSkuId, setCatalogMapSkuId] = useState<string | null>(null);
+  const [rulesLocationFilter, setRulesLocationFilter] = useState<string>("all");
+  const [rulesFormMode, setRulesFormMode] = useState<"closed" | "create" | "edit">("closed");
+  const [ruleCenterForm, setRuleCenterForm] = useState<{
+    id?: string;
+    zoneId: string;
+    selectorMode: RuleTemplateSelectorMode;
+    skuId: string;
+    source: InventorySource;
+    minQty: number;
+    maxQty: number;
+    priority: number;
+    kit?: CatalogKitValue;
+    ageGroup?: CatalogAgeGroupValue;
+    gender?: CatalogGenderValue;
+    role?: CatalogRoleValue;
+    quality?: CatalogQualityValue;
+  }>({
+    zoneId: ALL_LOCATIONS_OPTION_ID,
+    selectorMode: "SKU",
+    skuId: sampleDataset.skus[0]?.id ?? "",
+    source: "RFID",
+    minQty: 1,
+    maxQty: 4,
+    priority: 1
+  });
+
+  const openTasks = useMemo(
+    () => tasks.tasks.filter((task) => task.status === "CREATED" || task.status === "ASSIGNED" || task.status === "IN_PROGRESS"),
+    [tasks.tasks]
+  );
+
+  const zoneRules = useMemo(
+    () => (selectedZone === "all" ? rules : rules.filter((rule) => rule.zoneId === selectedZone)),
+    [rules, selectedZone]
+  );
+
+  const selectedZoneSkuOptions = useMemo(() => {
+    const fromInventory = (zoneDetail?.inventory ?? []).map((item) => item.skuId);
+    const fromRules = zoneRules.map((rule) => rule.skuId);
+    return Array.from(new Set([...fromInventory, ...fromRules]));
+  }, [zoneDetail, zoneRules]);
+
+  const selectedZoneSummary = useMemo(() => {
+    if (selectedZone === "all") return undefined;
+    return dashboard.zones.find((zone) => zone.zoneId === selectedZone);
+  }, [dashboard.zones, selectedZone]);
+
+  const selectedLocation = useMemo(() => {
+    if (selectedZone === "all") return undefined;
+    return locations.find((zone) => zone.id === selectedZone);
+  }, [locations, selectedZone]);
+
+  const salesEnabledLocations = useMemo(() => {
+    const zoneMetaById = new Map(locations.map((zone) => [zone.id, zone]));
+    return dashboard.zones
+      .filter((zone) => zone.isSalesLocation)
+      .map((zone) => ({
+        id: zone.zoneId as InventoryZoneId,
+        name: zoneMetaById.get(zone.zoneId)?.name ?? zone.zoneName
+      }));
+  }, [dashboard.zones, locations]);
+
+  const orderableZoneIds = useMemo(
+    () => salesEnabledLocations.map((zone) => zone.id),
+    [salesEnabledLocations]
+  );
+  const locationNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const location of locations) {
+      map.set(location.id, location.name);
+    }
+    for (const external of receivingLocations.external) {
+      map.set(external.id, external.name);
+    }
+    return map;
+  }, [locations, receivingLocations.external]);
+  const sourceEditorOptions = useMemo(() => {
+    if (!selectedLocation) return [];
+    if (selectedLocation.isSalesLocation) {
+      return locations
+        .filter((zone) => zone.id !== selectedLocation.id)
+        .map((zone) => ({ id: zone.id, name: zone.name }));
+    }
+    return receivingLocations.external.map((entry) => ({ id: entry.id, name: entry.name }));
+  }, [locations, receivingLocations.external, selectedLocation]);
+  const pendingReceivingOrders = useMemo(
+    () => receivingOrders.filter((order) => order.status === "IN_TRANSIT"),
+    [receivingOrders]
+  );
+  const openUnifiedTaskCount = useMemo(
+    () => openTasks.length + pendingReceivingOrders.length,
+    [openTasks.length, pendingReceivingOrders.length]
+  );
+  const unifiedTaskRows = useMemo(() => {
+    const replenRows = tasks.tasks.map((task) => {
+      const zoneName = locationNameById.get(task.zoneId) ?? task.zoneId;
+      const isResolved = task.status === "CONFIRMED" || task.status === "REJECTED";
+      const statusTags: TaskStatusValue[] = [];
+      if (task.status === "CREATED") statusTags.push("CREATED");
+      if (task.status === "ASSIGNED") statusTags.push("ASSIGNED");
+      if (task.status === "IN_PROGRESS") statusTags.push("IN_PROGRESS");
+      if (task.status === "CONFIRMED") statusTags.push("CONFIRMED");
+      if (task.status === "REJECTED") statusTags.push("REJECTED");
+      return {
+        id: task.id,
+        type: "REPLENISHMENT" as const,
+        locationId: task.zoneId,
+        locationName: zoneName,
+        skuId: task.skuId,
+        sourceLabel: task.sourceZoneId ? (locationNameById.get(task.sourceZoneId) ?? task.sourceZoneId) : "-",
+        status: task.status,
+        assignedStaffId: task.assignedStaffId,
+        createdAt: task.createdAt,
+        qtyLabel: `${task.deficitQty}`,
+        isOpen: !isResolved,
+        statusTags
+      };
+    });
+
+    const receivingRows = receivingOrders.map((order) => {
+      const destinationName = locationNameById.get(order.destinationZoneId) ?? order.destinationZoneId;
+      const sourceName = locationNameById.get(order.sourceLocationId) ?? order.sourceLocationId;
+      const isResolved = order.status === "CONFIRMED" || order.status === "CANCELLED";
+      const statusTags: TaskStatusValue[] = [];
+      if (order.status === "IN_TRANSIT") statusTags.push("IN_TRANSIT");
+      if (order.status === "CONFIRMED") statusTags.push("CONFIRMED");
+      if (order.status === "CANCELLED") statusTags.push("REJECTED");
+      return {
+        id: order.id,
+        type: "RECEIVING" as const,
+        locationId: order.destinationZoneId,
+        locationName: destinationName,
+        skuId: order.skuId,
+        sourceLabel: sourceName,
+        status: order.status,
+        assignedStaffId: order.assignedStaffId,
+        createdAt: order.createdAt,
+        qtyLabel: `${order.confirmedQty}/${order.requestedQty}`,
+        isOpen: !isResolved,
+        statusTags
+      };
+    });
+
+    return [...replenRows, ...receivingRows].sort(
+      (a, b) => toTimestampMs(b.createdAt)! - toTimestampMs(a.createdAt)!
+    );
+  }, [tasks.tasks, receivingOrders, locationNameById]);
+  const filteredUnifiedTaskRows = useMemo(() => {
+    return unifiedTaskRows.filter((row) => {
+      if (taskHubTypeFilters.length > 0 && !taskHubTypeFilters.includes(row.type)) return false;
+      if (taskHubLocationFilters.length > 0 && !taskHubLocationFilters.includes(row.locationId)) return false;
+      if (taskHubStatusFilters.length > 0 && !taskHubStatusFilters.some((status) => row.statusTags.includes(status))) return false;
+      return true;
+    });
+  }, [unifiedTaskRows, taskHubTypeFilters, taskHubLocationFilters, taskHubStatusFilters]);
+  const taskHubDestinationLocationOptions = useMemo(() => {
+    const onlyReplenishment =
+      taskHubTypeFilters.length > 0 &&
+      taskHubTypeFilters.every((type) => type === "REPLENISHMENT");
+    const onlyReceiving =
+      taskHubTypeFilters.length > 0 &&
+      taskHubTypeFilters.every((type) => type === "RECEIVING");
+    const baseLocations = onlyReplenishment
+      ? locations.filter((location) => location.isSalesLocation)
+      : onlyReceiving
+        ? locations.filter((location) => !location.isSalesLocation)
+        : locations;
+    return baseLocations.map((location) => ({ id: location.id, name: location.name }));
+  }, [locations, taskHubTypeFilters]);
+  const taskHubStatusOptions = useMemo(
+    () => [
+      { id: "CREATED", label: t(lang, "taskFilterStatusCreated") },
+      { id: "ASSIGNED", label: t(lang, "taskFilterStatusAssigned") },
+      { id: "IN_PROGRESS", label: t(lang, "taskFilterStatusInProgress") },
+      { id: "IN_TRANSIT", label: t(lang, "taskFilterStatusInTransit") },
+      { id: "CONFIRMED", label: t(lang, "taskFilterStatusConfirmed") },
+      { id: "REJECTED", label: t(lang, "taskFilterStatusRejected") }
+    ],
+    [lang]
+  );
+  const taskHubTypeOptions = useMemo(
+    () => [
+      { id: "REPLENISHMENT", label: t(lang, "taskFilterTypeReplenishment") },
+      { id: "RECEIVING", label: t(lang, "taskFilterTypeReceiving") }
+    ],
+    [lang]
+  );
+  const taskHubActiveFilters = useMemo(() => {
+    const filters: Array<{ key: TaskHubFilterKey; label: string; valueLabel: string }> = [];
+    if (taskHubTypeFilters.length > 0) {
+      filters.push({
+        key: "TYPE",
+        label: t(lang, "taskFilterTypeLabel"),
+        valueLabel: taskHubTypeFilters
+          .map((selected) => taskHubTypeOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    if (taskHubLocationFilters.length > 0) {
+      filters.push({
+        key: "DESTINATION",
+        label: t(lang, "taskFilterDestinationLabel"),
+        valueLabel: taskHubLocationFilters
+          .map(
+            (selected) =>
+              taskHubDestinationLocationOptions.find((option) => option.id === selected)?.name ?? selected
+          )
+          .join(", ")
+      });
+    }
+    if (taskHubStatusFilters.length > 0) {
+      filters.push({
+        key: "STATUS",
+        label: t(lang, "taskFilterStatusLabel"),
+        valueLabel: taskHubStatusFilters
+          .map((selected) => taskHubStatusOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    return filters;
+  }, [
+    taskHubTypeFilters,
+    taskHubLocationFilters,
+    taskHubStatusFilters,
+    taskHubTypeOptions,
+    taskHubDestinationLocationOptions,
+    taskHubStatusOptions,
+    lang
+  ]);
+  const taskHubAddableFilterKeys = useMemo(() => {
+    const keys: TaskHubFilterKey[] = [];
+    if (taskHubTypeFilters.length === 0) keys.push("TYPE");
+    if (taskHubLocationFilters.length === 0) keys.push("DESTINATION");
+    if (taskHubStatusFilters.length === 0) keys.push("STATUS");
+    return keys;
+  }, [taskHubTypeFilters, taskHubLocationFilters, taskHubStatusFilters]);
+  const taskHubPendingOptions = useMemo(() => {
+    if (!taskHubPendingFilterKey) return [];
+    const source =
+      taskHubPendingFilterKey === "TYPE"
+        ? taskHubTypeOptions.map((option) => ({ id: option.id, label: option.label }))
+        : taskHubPendingFilterKey === "DESTINATION"
+          ? taskHubDestinationLocationOptions.map((option) => ({ id: option.id, label: option.name }))
+          : taskHubStatusOptions.map((option) => ({ id: option.id, label: option.label }));
+    const search = taskHubFilterSearch.trim().toLowerCase();
+    if (!search) return source;
+    return source.filter((option) => option.label.toLowerCase().includes(search));
+  }, [
+    taskHubPendingFilterKey,
+    taskHubTypeOptions,
+    taskHubDestinationLocationOptions,
+    taskHubStatusOptions,
+    taskHubFilterSearch
+  ]);
+
+  const catalogSourceOptions = useMemo(
+    () => [
+      { id: "RFID" as CatalogSourceFilterValue, label: "RFID" },
+      { id: "NON_RFID" as CatalogSourceFilterValue, label: "NO-RFID" }
+    ],
+    []
+  );
+  const catalogKitOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogEntries
+            .flatMap((product) => product.variants.map((variant) => variant.kit))
+            .filter((value): value is CatalogKitValue => value !== undefined)
+        )
+      )
+        .map((id) => ({ id, label: t(lang, `catalogValue_${id}`) })),
+    [catalogEntries, lang]
+  );
+  const catalogAgeGroupOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogEntries
+            .flatMap((product) => product.variants.map((variant) => variant.ageGroup))
+            .filter((value): value is CatalogAgeGroupValue => value !== undefined)
+        )
+      )
+        .map((id) => ({ id, label: t(lang, `catalogValue_${id}`) })),
+    [catalogEntries, lang]
+  );
+  const catalogGenderOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogEntries
+            .flatMap((product) => product.variants.map((variant) => variant.gender))
+            .filter((value): value is CatalogGenderValue => value !== undefined)
+        )
+      )
+        .map((id) => ({ id, label: t(lang, `catalogValue_${id}`) })),
+    [catalogEntries, lang]
+  );
+  const catalogRoleOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogEntries
+            .flatMap((product) => product.variants.map((variant) => variant.role))
+            .filter((value): value is CatalogRoleValue => value !== undefined)
+        )
+      )
+        .map((id) => ({ id, label: t(lang, `catalogValue_${id}`) })),
+    [catalogEntries, lang]
+  );
+  const catalogQualityOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogEntries
+            .flatMap((product) => product.variants.map((variant) => variant.quality))
+            .filter((value): value is CatalogQualityValue => value !== undefined)
+        )
+      )
+        .map((id) => ({ id, label: t(lang, `catalogValue_${id}`) })),
+    [catalogEntries, lang]
+  );
+  const catalogActiveFilters = useMemo(() => {
+    const filters: Array<{ key: CatalogFilterKey; label: string; valueLabel: string }> = [];
+    if (catalogSourceFilters.length > 0) {
+      filters.push({
+        key: "SOURCE",
+        label: t(lang, "catalogSourceLabel"),
+        valueLabel: catalogSourceFilters
+          .map((selected) => catalogSourceOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    if (catalogKitFilters.length > 0) {
+      filters.push({
+        key: "KIT",
+        label: t(lang, "catalogKit"),
+        valueLabel: catalogKitFilters
+          .map((selected) => catalogKitOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    if (catalogAgeGroupFilters.length > 0) {
+      filters.push({
+        key: "AGE_GROUP",
+        label: t(lang, "catalogAgeGroup"),
+        valueLabel: catalogAgeGroupFilters
+          .map((selected) => catalogAgeGroupOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    if (catalogGenderFilters.length > 0) {
+      filters.push({
+        key: "GENDER",
+        label: t(lang, "catalogGender"),
+        valueLabel: catalogGenderFilters
+          .map((selected) => catalogGenderOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    if (catalogRoleFilters.length > 0) {
+      filters.push({
+        key: "ROLE",
+        label: t(lang, "catalogRole"),
+        valueLabel: catalogRoleFilters
+          .map((selected) => catalogRoleOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    if (catalogQualityFilters.length > 0) {
+      filters.push({
+        key: "QUALITY",
+        label: t(lang, "catalogQuality"),
+        valueLabel: catalogQualityFilters
+          .map((selected) => catalogQualityOptions.find((option) => option.id === selected)?.label ?? selected)
+          .join(", ")
+      });
+    }
+    return filters;
+  }, [
+    catalogSourceFilters,
+    catalogKitFilters,
+    catalogAgeGroupFilters,
+    catalogGenderFilters,
+    catalogRoleFilters,
+    catalogQualityFilters,
+    catalogSourceOptions,
+    catalogKitOptions,
+    catalogAgeGroupOptions,
+    catalogGenderOptions,
+    catalogRoleOptions,
+    catalogQualityOptions,
+    lang
+  ]);
+  const catalogAddableFilterKeys = useMemo(() => {
+    const keys: CatalogFilterKey[] = [];
+    if (catalogSourceFilters.length === 0) keys.push("SOURCE");
+    if (catalogKitFilters.length === 0) keys.push("KIT");
+    if (catalogAgeGroupFilters.length === 0) keys.push("AGE_GROUP");
+    if (catalogGenderFilters.length === 0) keys.push("GENDER");
+    if (catalogRoleFilters.length === 0) keys.push("ROLE");
+    if (catalogQualityFilters.length === 0) keys.push("QUALITY");
+    return keys;
+  }, [
+    catalogSourceFilters,
+    catalogKitFilters,
+    catalogAgeGroupFilters,
+    catalogGenderFilters,
+    catalogRoleFilters,
+    catalogQualityFilters
+  ]);
+  const catalogPendingOptions = useMemo(() => {
+    if (!catalogPendingFilterKey) return [];
+    const source =
+      catalogPendingFilterKey === "SOURCE"
+        ? catalogSourceOptions.map((option) => ({ id: option.id, label: option.label }))
+        : catalogPendingFilterKey === "KIT"
+          ? catalogKitOptions.map((option) => ({ id: option.id, label: option.label }))
+          : catalogPendingFilterKey === "AGE_GROUP"
+            ? catalogAgeGroupOptions.map((option) => ({ id: option.id, label: option.label }))
+            : catalogPendingFilterKey === "GENDER"
+              ? catalogGenderOptions.map((option) => ({ id: option.id, label: option.label }))
+              : catalogPendingFilterKey === "ROLE"
+                ? catalogRoleOptions.map((option) => ({ id: option.id, label: option.label }))
+                : catalogQualityOptions.map((option) => ({ id: option.id, label: option.label }));
+    const search = catalogFilterSearch.trim().toLowerCase();
+    if (!search) return source;
+    return source.filter((option) => option.label.toLowerCase().includes(search));
+  }, [
+    catalogPendingFilterKey,
+    catalogSourceOptions,
+    catalogKitOptions,
+    catalogAgeGroupOptions,
+    catalogGenderOptions,
+    catalogRoleOptions,
+    catalogQualityOptions,
+    catalogFilterSearch
+  ]);
+  const filteredCatalogEntries = useMemo(
+    () =>
+      catalogEntries
+        .map((product) => ({
+          ...product,
+          variants: product.variants.filter((variant) => {
+            if (catalogSourceFilters.length > 0 && !catalogSourceFilters.includes(variant.source)) return false;
+            if (catalogKitFilters.length > 0 && (!variant.kit || !catalogKitFilters.includes(variant.kit))) return false;
+            if (catalogAgeGroupFilters.length > 0 && (!variant.ageGroup || !catalogAgeGroupFilters.includes(variant.ageGroup))) return false;
+            if (catalogGenderFilters.length > 0 && (!variant.gender || !catalogGenderFilters.includes(variant.gender))) return false;
+            if (catalogRoleFilters.length > 0 && (!variant.role || !catalogRoleFilters.includes(variant.role))) return false;
+            if (catalogQualityFilters.length > 0 && (!variant.quality || !catalogQualityFilters.includes(variant.quality))) return false;
+            return true;
+          })
+        }))
+        .filter((product) => product.variants.length > 0),
+    [
+      catalogEntries,
+      catalogSourceFilters,
+      catalogKitFilters,
+      catalogAgeGroupFilters,
+      catalogGenderFilters,
+      catalogRoleFilters,
+      catalogQualityFilters
+    ]
+  );
+  const catalogMapPulseZones = useMemo(() => {
+    if (!catalogMapSkuId) return [];
+    return locations
+      .filter((location) =>
+        (dashboard.zones.find((zone) => zone.zoneId === location.id)?.inventory ?? []).some(
+          (item) => item.skuId === catalogMapSkuId && item.qty > 0
+        )
+      )
+      .map((location) => location.id);
+  }, [dashboard.zones, locations, catalogMapSkuId]);
+  const catalogMapSkuLabel = useMemo(() => {
+    if (!catalogMapSkuId) return "";
+    return ALL_SKUS.find((sku) => sku.id === catalogMapSkuId)?.name ?? catalogMapSkuId;
+  }, [catalogMapSkuId]);
+  const skuNameById = useMemo(
+    () => new Map(ALL_SKUS.map((sku) => [sku.id, sku.name])),
+    []
+  );
+  const ruleLocationOptions = useMemo(
+    () =>
+      locations.map((location) => ({
+        id: location.id,
+        name: location.name
+      })),
+    [locations]
+  );
+  const catalogSkuVariantMeta = useMemo(
+    () =>
+      catalogEntries.flatMap((product) =>
+        product.variants.map((variant) => ({
+          skuId: variant.skuId,
+          source: variant.source as InventorySource,
+          kit: variant.kit,
+          ageGroup: variant.ageGroup,
+          gender: variant.gender,
+          role: variant.role,
+          quality: variant.quality
+        }))
+      ),
+    [catalogEntries]
+  );
+  const rulesSkuOptions = useMemo(
+    () =>
+      ALL_SKUS.filter((sku) => sku.source === ruleCenterForm.source).map((sku) => ({
+        id: sku.id,
+        label: `${sku.id} · ${sku.name}`
+      })),
+    [ruleCenterForm.source]
+  );
+  const rulesAttrKitOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogSkuVariantMeta
+            .filter((entry) => entry.source === ruleCenterForm.source)
+            .map((entry) => entry.kit)
+            .filter((value): value is CatalogKitValue => value !== undefined)
+        )
+      ),
+    [catalogSkuVariantMeta, ruleCenterForm.source]
+  );
+  const rulesAttrAgeOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogSkuVariantMeta
+            .filter((entry) => entry.source === ruleCenterForm.source)
+            .map((entry) => entry.ageGroup)
+            .filter((value): value is CatalogAgeGroupValue => value !== undefined)
+        )
+      ),
+    [catalogSkuVariantMeta, ruleCenterForm.source]
+  );
+  const rulesAttrGenderOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogSkuVariantMeta
+            .filter((entry) => entry.source === ruleCenterForm.source)
+            .map((entry) => entry.gender)
+            .filter((value): value is CatalogGenderValue => value !== undefined)
+        )
+      ),
+    [catalogSkuVariantMeta, ruleCenterForm.source]
+  );
+  const rulesAttrRoleOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogSkuVariantMeta
+            .filter((entry) => entry.source === ruleCenterForm.source)
+            .map((entry) => entry.role)
+            .filter((value): value is CatalogRoleValue => value !== undefined)
+        )
+      ),
+    [catalogSkuVariantMeta, ruleCenterForm.source]
+  );
+  const rulesAttrQualityOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalogSkuVariantMeta
+            .filter((entry) => entry.source === ruleCenterForm.source)
+            .map((entry) => entry.quality)
+            .filter((value): value is CatalogQualityValue => value !== undefined)
+        )
+      ),
+    [catalogSkuVariantMeta, ruleCenterForm.source]
+  );
+  const ruleCenterMatchedSkuIds = useMemo(() => {
+    if (ruleCenterForm.selectorMode === "SKU") {
+      return ruleCenterForm.skuId ? [ruleCenterForm.skuId] : [];
+    }
+    return Array.from(
+      new Set(
+        catalogSkuVariantMeta
+          .filter((entry) => entry.source === ruleCenterForm.source)
+          .filter((entry) => (ruleCenterForm.kit ? entry.kit === ruleCenterForm.kit : true))
+          .filter((entry) => (ruleCenterForm.ageGroup ? entry.ageGroup === ruleCenterForm.ageGroup : true))
+          .filter((entry) => (ruleCenterForm.gender ? entry.gender === ruleCenterForm.gender : true))
+          .filter((entry) => (ruleCenterForm.role ? entry.role === ruleCenterForm.role : true))
+          .filter((entry) => (ruleCenterForm.quality ? entry.quality === ruleCenterForm.quality : true))
+          .map((entry) => entry.skuId)
+      )
+    );
+  }, [
+    catalogSkuVariantMeta,
+    ruleCenterForm.selectorMode,
+    ruleCenterForm.skuId,
+    ruleCenterForm.source,
+    ruleCenterForm.kit,
+    ruleCenterForm.ageGroup,
+    ruleCenterForm.gender,
+    ruleCenterForm.role,
+    ruleCenterForm.quality
+  ]);
+  const filteredRuleTemplates = useMemo(
+    () =>
+      ruleTemplates.filter((entry) => {
+        if (rulesLocationFilter !== "all") {
+          if (entry.scope === "LOCATION" && entry.zoneId !== rulesLocationFilter) return false;
+          if (entry.scope === "GENERIC") return false;
+        }
+        return true;
+      }),
+    [ruleTemplates, rulesLocationFilter]
+  );
+
+  const activeStaff = useMemo(() => staff.filter((member) => member.activeShift), [staff]);
+  const zoneOrder = useMemo(() => locations.map((zone) => zone.id as InventoryZoneId), [locations]);
+  const analyticsData = useMemo(() => {
+    const allTasks = tasks.tasks;
+    const statusCounts: Record<"CREATED" | "ASSIGNED" | "IN_PROGRESS" | "CONFIRMED" | "REJECTED", number> = {
+      CREATED: 0,
+      ASSIGNED: 0,
+      IN_PROGRESS: 0,
+      CONFIRMED: 0,
+      REJECTED: 0
+    };
+    for (const task of allTasks) {
+      statusCounts[task.status] += 1;
+    }
+
+    const queueUnassigned = tasks.tasks.filter((task) => task.status === "CREATED").length;
+    const openInProgress = allTasks.filter((task) => task.status === "IN_PROGRESS").length;
+    const openBlocked = allTasks.filter((task) => {
+      if (task.status !== "CREATED" && task.status !== "ASSIGNED" && task.status !== "IN_PROGRESS") return false;
+      if (!task.sourceCandidates || task.sourceCandidates.length === 0) return true;
+      return task.sourceCandidates.every((candidate) => candidate.availableQty <= 0);
+    }).length;
+    const confirmedTasks = allTasks.filter(
+      (task) => task.closeReason?.startsWith("confirmed") && (task.confirmedQty ?? 0) > 0
+    );
+    const partialConfirmedCount = allTasks.filter((task) => task.closeReason === "confirmed_partial").length;
+
+    const confirmDurations = confirmedTasks
+      .map((task) => {
+        const assignedAtMs = toTimestampMs(task.assignedAt);
+        const closedAtMs = toTimestampMs(task.closedAt);
+        if (assignedAtMs === null || closedAtMs === null || closedAtMs <= assignedAtMs) return null;
+        return (closedAtMs - assignedAtMs) / 1000;
+      })
+      .filter((value): value is number => value !== null);
+
+    const avgConfirmSeconds =
+      confirmDurations.length === 0
+        ? null
+        : confirmDurations.reduce((sum, value) => sum + value, 0) / confirmDurations.length;
+
+    const skuMap = new Map<
+      string,
+      { skuId: string; taskCount: number; totalDeficit: number; totalConfirmed: number; confirmDurations: number[] }
+    >();
+    for (const task of allTasks) {
+      const current =
+        skuMap.get(task.skuId) ??
+        { skuId: task.skuId, taskCount: 0, totalDeficit: 0, totalConfirmed: 0, confirmDurations: [] };
+      current.taskCount += 1;
+      current.totalDeficit += Math.max(0, task.deficitQty);
+      current.totalConfirmed += Math.max(0, task.confirmedQty ?? 0);
+      if (task.closeReason?.startsWith("confirmed")) {
+        const assignedAtMs = toTimestampMs(task.assignedAt);
+        const closedAtMs = toTimestampMs(task.closedAt);
+        if (assignedAtMs !== null && closedAtMs !== null && closedAtMs > assignedAtMs) {
+          current.confirmDurations.push((closedAtMs - assignedAtMs) / 1000);
+        }
+      }
+      skuMap.set(task.skuId, current);
+    }
+
+    const skuStats = [...skuMap.values()]
+      .map((entry) => ({
+        skuId: entry.skuId,
+        taskCount: entry.taskCount,
+        totalDeficit: entry.totalDeficit,
+        totalConfirmed: entry.totalConfirmed,
+        avgConfirmSeconds:
+          entry.confirmDurations.length === 0
+            ? null
+            : entry.confirmDurations.reduce((sum, value) => sum + value, 0) / entry.confirmDurations.length
+      }))
+      .sort((a, b) => b.totalConfirmed - a.totalConfirmed || b.taskCount - a.taskCount);
+
+    const movementByZone = new Map<
+      string,
+      { zoneId: string; confirmedQty: number; confirmedTasks: number; openDemandQty: number }
+    >();
+    for (const zone of locations) {
+      movementByZone.set(zone.id, {
+        zoneId: zone.id,
+        confirmedQty: 0,
+        confirmedTasks: 0,
+        openDemandQty: 0
+      });
+    }
+    for (const task of allTasks) {
+      const current =
+        movementByZone.get(task.zoneId) ??
+        { zoneId: task.zoneId, confirmedQty: 0, confirmedTasks: 0, openDemandQty: 0 };
+      if (task.closeReason?.startsWith("confirmed")) {
+        current.confirmedQty += Math.max(0, task.confirmedQty ?? 0);
+        current.confirmedTasks += 1;
+      }
+      if (task.status === "CREATED" || task.status === "ASSIGNED" || task.status === "IN_PROGRESS") {
+        current.openDemandQty += Math.max(0, task.deficitQty);
+      }
+      movementByZone.set(task.zoneId, current);
+    }
+    const zoneMovement = [...movementByZone.values()].sort(
+      (a, b) => b.confirmedQty - a.confirmedQty || b.confirmedTasks - a.confirmedTasks
+    );
+    const topZoneMovement = zoneMovement[0];
+
+    const staffStats = staff.map((member) => {
+      const assigned = tasks.tasks.filter((task) => task.assignedStaffId === member.id);
+      const open = assigned.filter((task) => task.status === "CREATED").length;
+      const assignedOnly = assigned.filter((task) => task.status === "ASSIGNED").length;
+      const inProgress = assigned.filter((task) => task.status === "IN_PROGRESS").length;
+      const completed = assigned.filter((task) => task.status === "CONFIRMED").length;
+      const cancelled = assigned.filter((task) => task.status === "REJECTED").length;
+      const confirmed = assigned.filter((task) => task.confirmedBy === member.id).length;
+      const confirmedQty = assigned.reduce((sum, task) => sum + Math.max(0, task.confirmedQty ?? 0), 0);
+
+      const cycleSeconds = assigned
+        .map((task) => {
+          const assignedAtMs = toTimestampMs(task.assignedAt);
+          const closedAtMs = toTimestampMs(task.closedAt);
+          if (assignedAtMs === null || closedAtMs === null || closedAtMs <= assignedAtMs) return null;
+          return (closedAtMs - assignedAtMs) / 1000;
+        })
+        .filter((value): value is number => value !== null);
+
+      const confirmSeconds = assigned
+        .filter((task) => task.confirmedBy === member.id && task.closeReason?.startsWith("confirmed"))
+        .map((task) => {
+          const assignedAtMs = toTimestampMs(task.assignedAt);
+          const closedAtMs = toTimestampMs(task.closedAt);
+          if (assignedAtMs === null || closedAtMs === null || closedAtMs <= assignedAtMs) return null;
+          return (closedAtMs - assignedAtMs) / 1000;
+        })
+        .filter((value): value is number => value !== null);
+
+      const avgCycleSeconds =
+        cycleSeconds.length === 0 ? null : cycleSeconds.reduce((sum, value) => sum + value, 0) / cycleSeconds.length;
+      const avgConfirmSeconds =
+        confirmSeconds.length === 0
+          ? null
+          : confirmSeconds.reduce((sum, value) => sum + value, 0) / confirmSeconds.length;
+
+      return {
+        memberId: member.id,
+        memberName: member.name,
+        open,
+        assignedOnly,
+        inProgress,
+        completed,
+        cancelled,
+        confirmed,
+        confirmedQty,
+        assignedTotal: assigned.length,
+        avgCycleSeconds,
+        avgConfirmSeconds
+      };
+    }).sort((a, b) => b.completed - a.completed || b.confirmedQty - a.confirmedQty);
+
+    return {
+      totalTasks: allTasks.length,
+      backlog: statusCounts.CREATED + statusCounts.ASSIGNED + statusCounts.IN_PROGRESS,
+      avgConfirmSeconds,
+      partialConfirmedCount,
+      statusCounts,
+      queueUnassigned,
+      openInProgress,
+      openBlocked,
+      skuStats,
+      staffStats,
+      zoneMovement,
+      topZoneMovement
+    };
+  }, [staff, tasks.tasks, locations]);
+
+  const selectedZoneUnits = useMemo(() => {
+    const rows =
+      selectedZone === "all"
+        ? dashboard.zones.flatMap((zone) => zone.inventory)
+        : selectedZoneSummary?.inventory ?? [];
+    const total = rows.reduce((sum, row) => sum + row.qty, 0);
+    const rfid = rows.filter((row) => row.source === "RFID").reduce((sum, row) => sum + row.qty, 0);
+    return {
+      total,
+      rfid,
+      nonRfid: total - rfid
+    };
+  }, [dashboard.zones, selectedZone, selectedZoneSummary]);
+
+  const globalInventoryRows = useMemo(() => {
+    const grouped = new Map<string, { skuId: string; source: InventorySource; qty: number }>();
+    for (const zone of dashboard.zones) {
+      for (const item of zone.inventory) {
+        const key = `${item.skuId}::${item.source}`;
+        const current = grouped.get(key) ?? { skuId: item.skuId, source: item.source, qty: 0 };
+        current.qty += item.qty;
+        grouped.set(key, current);
+      }
+    }
+    return [...grouped.values()].sort((a, b) => a.skuId.localeCompare(b.skuId));
+  }, [dashboard.zones]);
+
+  const visibleInventoryRows = useMemo(() => {
+    if (selectedZone === "all") {
+      return globalInventoryRows.map((item) => ({ ...item, confidence: undefined as number | undefined }));
+    }
+    return (zoneDetail?.inventory ?? []).map((item) => ({
+      skuId: item.skuId,
+      source: item.source,
+      qty: item.qty,
+      confidence: item.confidence
+    }));
+  }, [globalInventoryRows, selectedZone, zoneDetail]);
+
+  const totals = useMemo(() => {
+    const totalUnits = dashboard.zones.flatMap((z) => z.inventory).reduce((sum, row) => sum + row.qty, 0);
+    const rfidUnits = dashboard.zones
+      .flatMap((z) => z.inventory)
+      .filter((row) => row.source === "RFID")
+      .reduce((sum, row) => sum + row.qty, 0);
+
+    return {
+      zones: dashboard.zones.length,
+      totalUnits,
+      rfidUnits,
+      nonRfidUnits: totalUnits - rfidUnits,
+      openTasks: openUnifiedTaskCount,
+      lowStockZones: dashboard.zones.filter((z) => z.lowStockCount > 0).length
+    };
+  }, [dashboard, openUnifiedTaskCount]);
+
+  const saleSkuAvailability = useMemo(() => {
+    const zoneInventory = dashboard.zones.find((zone) => zone.zoneId === saleZoneId)?.inventory ?? [];
+    const zoneInventoryBySku = new Map<string, number>();
+    for (const sku of ALL_SKUS) {
+      const source = SKU_SOURCE_BY_ID.get(sku.id) ?? "NON_RFID";
+      const qty = zoneInventory.find((row) => row.skuId === sku.id && row.source === source)?.qty ?? 0;
+      zoneInventoryBySku.set(sku.id, qty);
+    }
+
+    const reservedBySku = new Map<string, number>();
+    for (const customer of customers) {
+      const basket = api.getCustomerBasket(customer.id);
+      for (const item of basket) {
+        if (item.zoneId !== saleZoneId) continue;
+        const source = SKU_SOURCE_BY_ID.get(item.skuId) ?? "NON_RFID";
+        const reserved = source === "RFID" ? Math.max(0, item.qty - item.pickedConfirmedQty) : item.qty;
+        reservedBySku.set(item.skuId, (reservedBySku.get(item.skuId) ?? 0) + reserved);
+      }
+    }
+
+    return ALL_SKUS.map((sku) => {
+      const currentQty = zoneInventoryBySku.get(sku.id) ?? 0;
+      const reservedQty = reservedBySku.get(sku.id) ?? 0;
+      const availableQty = Math.max(0, currentQty - reservedQty);
+      return {
+        skuId: sku.id,
+        source: sku.source,
+        currentQty,
+        reservedQty,
+        availableQty
+      };
+    });
+  }, [dashboard.zones, saleZoneId, customers, customerBasket]);
+
+  const availableBySku = useMemo(
+    () => new Map(saleSkuAvailability.map((row) => [row.skuId, row.availableQty])),
+    [saleSkuAvailability]
+  );
+
+  const maxSaleQty = availableBySku.get(saleForm.skuId) ?? 0;
+  const canAddToCart =
+    orderableZoneIds.includes(saleZoneId) &&
+    Number.isFinite(saleForm.qty) &&
+    saleForm.qty > 0 &&
+    saleForm.qty <= maxSaleQty;
+
+  const otherCustomersInProgress = useMemo(() => {
+    return customers
+      .filter((customer) => customer.id !== selectedCustomerId)
+      .map((customer) => ({
+        customerId: customer.id,
+        customerName: customer.name,
+        items: api.getCustomerBasket(customer.id)
+      }))
+      .filter((entry) => entry.items.length > 0);
+  }, [customers, selectedCustomerId, customerBasket]);
+
+  const salesInProgressCount = useMemo(() => {
+    return customers.reduce((count, customer) => {
+      const items = api.getCustomerBasket(customer.id);
+      return items.length > 0 ? count + 1 : count;
+    }, 0);
+  }, [customers, customerBasket]);
+
+  useEffect(() => {
+    if (selectedZoneSkuOptions.length === 0) return;
+    if (!selectedZoneSkuOptions.includes(ruleForm.skuId)) {
+      setRuleForm((prev) => ({ ...prev, skuId: selectedZoneSkuOptions[0] }));
+    }
+  }, [ruleForm.skuId, selectedZoneSkuOptions]);
+
+  useEffect(() => {
+    const existing = zoneRules.find(
+      (rule) => rule.skuId === ruleForm.skuId && rule.source === ruleForm.source
+    );
+    if (!existing) return;
+
+    setRuleForm((prev) => {
+      if (
+        prev.minQty === existing.minQty &&
+        prev.maxQty === existing.maxQty
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        minQty: existing.minQty,
+        maxQty: existing.maxQty
+      };
+    });
+  }, [zoneRules, ruleForm.skuId, ruleForm.source]);
+
+  useEffect(() => {
+    setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
+  }, [selectedCustomerId]);
+
+  useEffect(() => {
+    if (selectedZone !== "all") {
+      setSaleZoneId(selectedZone);
+    }
+  }, [selectedZone]);
+
+  useEffect(() => {
+    if (orderableZoneIds.length === 0) return;
+    if (!orderableZoneIds.includes(saleZoneId)) {
+      setSaleZoneId(orderableZoneIds[0]);
+    }
+  }, [orderableZoneIds, saleZoneId]);
+
+  useEffect(() => {
+    if (locations.length === 0) return;
+    if (!locations.some((zone) => zone.id === rfidSweepZoneId)) {
+      setRfidSweepZoneId(locations[0].id);
+    }
+  }, [locations, rfidSweepZoneId]);
+
+  useEffect(() => {
+    if (!autoSweepEnabled) return;
+    setAutoSweepRemainingSec(AUTO_SWEEP_INTERVAL_SEC);
+  }, [autoSweepEnabled]);
+
+  useEffect(() => {
+    if (taskHubLocationFilters.length === 0) return;
+    const allowedIds = new Set(taskHubDestinationLocationOptions.map((option) => option.id));
+    setTaskHubLocationFilters((prev) => {
+      const next = prev.filter((id) => allowedIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [taskHubDestinationLocationOptions, taskHubLocationFilters]);
+
+  useEffect(() => {
+    const currentAvailable = availableBySku.get(saleForm.skuId) ?? 0;
+    if (saleForm.qty > currentAvailable && currentAvailable > 0) {
+      setSaleForm((prev) => ({ ...prev, qty: currentAvailable }));
+    }
+  }, [saleForm.skuId, saleForm.qty, saleSkuAvailability, availableBySku]);
+
+  useEffect(() => {
+    if (ruleCenterForm.selectorMode !== "SKU") return;
+    if (rulesSkuOptions.length === 0) return;
+    if (!rulesSkuOptions.some((option) => option.id === ruleCenterForm.skuId)) {
+      setRuleCenterForm((prev) => ({ ...prev, skuId: rulesSkuOptions[0].id }));
+    }
+  }, [ruleCenterForm.selectorMode, ruleCenterForm.skuId, rulesSkuOptions]);
+
+  useEffect(() => {
+    if (!selectedLocation) return;
+    const allowedSourceIds = new Set(
+      selectedLocation.isSalesLocation
+        ? locations.filter((zone) => zone.id !== selectedLocation.id).map((zone) => zone.id)
+        : receivingLocations.external.map((entry) => entry.id)
+    );
+    setZoneEditForm({
+      name: selectedLocation.name,
+      color: selectedLocation.color,
+      isSalesLocation: selectedLocation.isSalesLocation
+    });
+    setPreviewZoneColor(null);
+    setSourceEditor(
+      [...selectedLocation.replenishmentSources]
+        .filter((source) => allowedSourceIds.has(source.sourceZoneId))
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+    );
+    setDraftPolygon([...selectedLocation.mapPolygon]);
+  }, [selectedLocation, locations, receivingLocations.external]);
+
+  useEffect(() => {
+    if (sourceEditorOptions.length === 0) {
+      if (sourceEditor.length > 0) setSourceEditor([]);
+      return;
+    }
+    const allowed = new Set(sourceEditorOptions.map((entry) => entry.id));
+    const filtered = sourceEditor.filter((entry) => allowed.has(entry.sourceZoneId));
+    if (filtered.length !== sourceEditor.length) {
+      setSourceEditor(filtered.map((entry, index) => ({ ...entry, sortOrder: index + 1 })));
+    }
+  }, [sourceEditor, sourceEditorOptions]);
+
+  useEffect(() => {
+    if (showZoneDrawer && zoneDrawerSection === "settings") return;
+    setPreviewZoneColor(null);
+    if (!selectedLocation) return;
+    setZoneEditForm((prev) =>
+      prev.color === selectedLocation.color ? prev : { ...prev, color: selectedLocation.color }
+    );
+  }, [showZoneDrawer, zoneDrawerSection, selectedLocation]);
+
+  useEffect(() => {
+    localStorage.setItem("sim-lang", lang);
+  }, [lang]);
+
+  useEffect(() => {
+    function onPointerDown(event: MouseEvent): void {
+      if (!showHeaderMenu) return;
+      const target = event.target as Node | null;
+      if (headerMenuRef.current && target && !headerMenuRef.current.contains(target)) {
+        setShowHeaderMenu(false);
+      }
+    }
+    window.addEventListener("mousedown", onPointerDown);
+    return () => window.removeEventListener("mousedown", onPointerDown);
+  }, [showHeaderMenu]);
+
+  function refresh(zone: ZoneScope = selectedZone): void {
+    setDashboard(api.getInventoryZones());
+    setLocations(api.getLocations());
+    setStaff(api.getStaff());
+    setTasks(api.getReplenishmentTasks());
+    setCatalogEntries(api.getCatalog());
+    setReceivingOrders(api.getReceivingOrders());
+    setReceivingLocations(api.getReceivingLocations());
+    setZoneDetail(zone === "all" ? null : api.getInventoryZoneById(zone));
+    setRules(api.getRules());
+    setRuleTemplates(api.getMinMaxRuleTemplates());
+    setFlow(api.getFlowEvents());
+    setTaskAudit(api.getTaskAudit());
+    setCustomers(api.getCustomers());
+    setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
+  }
+
+  function selectZone(zone: ZoneScope): void {
+    setPreviewZoneColor(null);
+    setSelectedZone(zone);
+    refresh(zone);
+  }
+
+  function selectZoneFromMapInteraction(zoneId: InventoryZoneId): void {
+    if (suppressMapClickRef.current) {
+      suppressMapClickRef.current = false;
+      return;
+    }
+    if (mapEditMode) return;
+    selectZone(zoneId);
+    openZoneDrawer("inventory");
+  }
+
+  function openZoneDrawer(section: ZoneDrawerSection): void {
+    if (section !== "settings") {
+      setPreviewZoneColor(null);
+    }
+    setShowSalesDrawer(false);
+    setShowRfidDrawer(false);
+    setZoneDrawerSection(section);
+    setShowZoneDrawer(true);
+  }
+
+  function closeZoneDrawer(): void {
+    setShowZoneDrawer(false);
+    if (createMode) {
+      setCreateMode(false);
+      setMapEditMode(false);
+      setNewZonePolygon([]);
+      releaseDragVertex();
+      return;
+    }
+    if (mapEditMode) {
+      setMapEditMode(false);
+      releaseDragVertex();
+    }
+  }
+
+  function openStaffMainView(): void {
+    setMainContentView("staff");
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+  }
+
+  function openAnalyticsMainView(): void {
+    setMainContentView("analytics");
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+  }
+
+  function openCatalogMainView(): void {
+    setMainContentView("catalog");
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+  }
+
+  function openTasksMainView(): void {
+    setMainContentView("tasks");
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+  }
+
+  function openRulesMainView(): void {
+    setMainContentView("rules");
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+  }
+
+  function openMapMainView(): void {
+    setMainContentView("map");
+    setShowHeaderMenu(false);
+  }
+
+  function zoomInMap(): void {
+    setMapZoom((prev) => Math.min(2.5, Number((prev + 0.2).toFixed(2))));
+  }
+
+  function zoomOutMap(): void {
+    setMapZoom((prev) => Math.max(0.8, Number((prev - 0.2).toFixed(2))));
+  }
+
+  function resetMapZoom(): void {
+    setMapZoom(1);
+    setMapPan({ x: 0, y: 0 });
+    setIsMapPanning(false);
+    setMapPanStart(null);
+    suppressMapClickRef.current = false;
+    const viewport = mapViewportRef.current;
+    if (viewport) {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    }
+    requestAnimationFrame(() => {
+      setMapPan({ x: 0, y: 0 });
+    });
+  }
+
+  function onMapWheelZoom(evt: ReactWheelEvent<HTMLDivElement>): void {
+    evt.preventDefault();
+    evt.stopPropagation();
+    const delta = evt.deltaY > 0 ? -0.1 : 0.1;
+    setMapZoom((prev) => {
+      const next = Number((prev + delta).toFixed(2));
+      return Math.max(0.8, Math.min(2.5, next));
+    });
+  }
+
+  function clampMapPan(nextX: number, nextY: number): { x: number; y: number } {
+    if (mapZoom <= 1) return { x: 0, y: 0 };
+    const viewport = mapViewportRef.current;
+    if (!viewport) return { x: nextX, y: nextY };
+
+    const minX = -(viewport.clientWidth * (mapZoom - 1));
+    const minY = -(viewport.clientHeight * (mapZoom - 1));
+
+    return {
+      x: Math.max(minX, Math.min(0, nextX)),
+      y: Math.max(minY, Math.min(0, nextY))
+    };
+  }
+
+  function startMapPan(evt: ReactPointerEvent<HTMLDivElement>): void {
+    if (evt.button !== 0) return;
+    if (mapZoom <= 1) return;
+    if (mapEditMode) return;
+    if (isDraggingVertex) return;
+    if (evt.target instanceof Element && evt.target.closest(".map-zoom-controls")) return;
+    evt.currentTarget.setPointerCapture(evt.pointerId);
+    setIsMapPanning(true);
+    setMapPanStart({
+      x: evt.clientX,
+      y: evt.clientY,
+      originX: mapPan.x,
+      originY: mapPan.y
+    });
+  }
+
+  function moveMapPan(evt: ReactPointerEvent<HTMLDivElement>): void {
+    if (!isMapPanning || !mapPanStart) return;
+    const dx = evt.clientX - mapPanStart.x;
+    const dy = evt.clientY - mapPanStart.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+      suppressMapClickRef.current = true;
+    }
+    setMapPan(clampMapPan(mapPanStart.originX + dx, mapPanStart.originY + dy));
+  }
+
+  function endMapPan(): void {
+    setIsMapPanning(false);
+    setMapPanStart(null);
+  }
+
+  useEffect(() => {
+    if (mapZoom <= 1) {
+      setMapPan({ x: 0, y: 0 });
+      return;
+    }
+    setMapPan((prev) => clampMapPan(prev.x, prev.y));
+  }, [mapZoom]);
+
+  function eventTs(offsetSec = 0): string {
+    const base = new Date(dashboard.asOf).getTime();
+    return new Date(base + offsetSec * 1000).toISOString();
+  }
+
+  function resetSalesFormOnOpen(): void {
+    const defaultCustomerId = customers[0]?.id ?? "cust-001";
+    const defaultZoneId = salesEnabledLocations[0]?.id ?? "zone-shelf-a";
+    const zoneInventory = dashboard.zones.find((zone) => zone.zoneId === defaultZoneId)?.inventory ?? [];
+    const defaultSkuId =
+      ALL_SKUS.find((sku) => {
+        const source = SKU_SOURCE_BY_ID.get(sku.id) ?? "NON_RFID";
+        const qty = zoneInventory.find((row) => row.skuId === sku.id && row.source === source)?.qty ?? 0;
+        return qty > 0;
+      })?.id ??
+      ALL_SKUS[0]?.id ??
+      "SKU-NR-1";
+
+    setSelectedCustomerId(defaultCustomerId);
+    setCustomerBasket(api.getCustomerBasket(defaultCustomerId));
+    setSaleZoneId(defaultZoneId);
+    setSaleForm({ skuId: defaultSkuId, qty: 1 });
+    setSalesStatusMessage("");
+  }
+
+  function injectRFIDPulse(): void {
+    const antenna = rfidCatalog.antennas.find((entry) => entry.id === rfidForm.antennaId);
+    if (!antenna || !rfidForm.epc) return;
+    api.postRFIDRead({
+      id: `rr-live-${Date.now()}`,
+      epc: rfidForm.epc,
+      antennaId: antenna.id,
+      zoneId: antenna.zoneId,
+      timestamp: eventTs(5),
+      rssi: Number(rfidForm.rssi),
+      ingestedAt: eventTs(5)
+    });
+    refresh();
+  }
+
+  function forceRfidZoneSweep(): void {
+    if (!rfidSweepZoneId) return;
+    api.postRFIDZoneSweep({
+      zoneId: rfidSweepZoneId,
+      timestamp: eventTs(6)
+    });
+    refresh();
+  }
+
+  function runAutomaticRfidSweep(): void {
+    if (locations.length === 0) return;
+    const baseMs = Date.now();
+    locations.forEach((zone, index) => {
+      const timestamp = new Date(baseMs + index).toISOString();
+      api.postRFIDZoneSweep({
+        zoneId: zone.id,
+        timestamp
+      });
+    });
+    refresh();
+  }
+
+  useEffect(() => {
+    if (!autoSweepEnabled) return;
+    const timer = window.setInterval(() => {
+      setAutoSweepRemainingSec((prev) => {
+        if (prev <= 1) {
+          runAutomaticRfidSweep();
+          return AUTO_SWEEP_INTERVAL_SEC;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [autoSweepEnabled, locations, selectedZone, selectedCustomerId, dashboard.asOf]);
+
+  function getSvgCoords(evt: ReactPointerEvent<SVGElement>): { x: number; y: number } {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const rect = svg.getBoundingClientRect();
+    const x = ((evt.clientX - rect.left) / rect.width) * SHOPFLOOR_SIZE.width;
+    const y = ((evt.clientY - rect.top) / rect.height) * SHOPFLOOR_SIZE.height;
+    return { x: Math.max(0, Math.min(SHOPFLOOR_SIZE.width, x)), y: Math.max(0, Math.min(SHOPFLOOR_SIZE.height, y)) };
+  }
+
+  function addPolygonPoint(evt: ReactPointerEvent<SVGSVGElement>): void {
+    if (!mapEditMode || isDraggingVertex) return;
+    const next = getSvgCoords(evt);
+    if (createMode) {
+      setNewZonePolygon((prev) => [...prev, next]);
+      return;
+    }
+    if (selectedZone === "all") return;
+    setDraftPolygon((prev) => [...prev, next]);
+  }
+
+  function updateDraggedVertex(evt: ReactPointerEvent<SVGSVGElement>): void {
+    if (!mapEditMode) return;
+    const next = getSvgCoords(evt);
+    if (createMode && dragPolygonStart && newZonePolygon.length > 0) {
+      const minX = Math.min(...newZonePolygon.map((point) => point.x));
+      const maxX = Math.max(...newZonePolygon.map((point) => point.x));
+      const minY = Math.min(...newZonePolygon.map((point) => point.y));
+      const maxY = Math.max(...newZonePolygon.map((point) => point.y));
+
+      const dx = next.x - dragPolygonStart.x;
+      const dy = next.y - dragPolygonStart.y;
+      const clampedDx = Math.min(
+        Math.max(dx, -minX),
+        SHOPFLOOR_SIZE.width - maxX
+      );
+      const clampedDy = Math.min(
+        Math.max(dy, -minY),
+        SHOPFLOOR_SIZE.height - maxY
+      );
+
+      setNewZonePolygon((prev) =>
+        prev.map((point) => ({
+          x: point.x + clampedDx,
+          y: point.y + clampedDy
+        }))
+      );
+      setDragPolygonStart({
+        x: dragPolygonStart.x + clampedDx,
+        y: dragPolygonStart.y + clampedDy
+      });
+      return;
+    }
+
+    if (dragVertexIndex === null || !dragTarget) return;
+    if (dragTarget === "new") {
+      setNewZonePolygon((prev) => prev.map((point, idx) => (idx === dragVertexIndex ? next : point)));
+      return;
+    }
+    setDraftPolygon((prev) => prev.map((point, idx) => (idx === dragVertexIndex ? next : point)));
+  }
+
+  function releaseDragVertex(): void {
+    setDragVertexIndex(null);
+    setDragTarget(null);
+    setIsDraggingVertex(false);
+    setDragPolygonStart(null);
+  }
+
+  function clearCurrentPolygonPoints(): void {
+    if (createMode) {
+      setNewZonePolygon([]);
+    } else {
+      setDraftPolygon([]);
+    }
+    releaseDragVertex();
+  }
+
+  function savePolygon(): void {
+    if (selectedZone === "all" || draftPolygon.length < 3) return;
+    api.updateLocation({ zoneId: selectedZone, mapPolygon: draftPolygon });
+    setMapEditMode(false);
+    releaseDragVertex();
+    refresh(selectedZone);
+  }
+
+  function startCreateZone(): void {
+    setCreateMode(true);
+    setMapEditMode(true);
+    setSelectedZone("all");
+    setNewZonePolygon([]);
+    setNewZoneForm((prev) => ({
+      ...prev,
+      zoneId: `zone-${Date.now().toString(36)}`,
+      name: "New Zone",
+      locationType: "sales"
+    }));
+    setShowZoneDrawer(true);
+    setZoneDrawerSection("settings");
+  }
+
+  function saveNewZone(): void {
+    if (newZoneForm.locationType === "external") {
+      const result = api.createExternalReceivingLocation({ name: newZoneForm.name });
+      setReceivingStatusMessage(`External location create: ${result.status}`);
+      refresh();
+      if (result.status === "created") {
+        setCreateMode(false);
+        setMapEditMode(false);
+        setNewZonePolygon([]);
+      }
+      return;
+    }
+    if (newZonePolygon.length < 3) return;
+    const result = api.createLocation({
+      zoneId: newZoneForm.zoneId.trim(),
+      name: newZoneForm.name,
+      color: newZoneForm.color,
+      isSalesLocation: newZoneForm.locationType === "sales",
+      mapPolygon: newZonePolygon,
+      replenishmentSources: []
+    });
+    refresh();
+    if (result.status === "created" && result.zone) {
+      setCreateMode(false);
+      setMapEditMode(false);
+      setNewZonePolygon([]);
+      selectZone(result.zone.id);
+    }
+  }
+
+  function createPosSale(): void {
+    const availableQty = availableBySku.get(saleForm.skuId) ?? 0;
+    if (saleForm.qty > availableQty) {
+      setSalesStatusMessage(
+        t(lang, "noStock", { requested: saleForm.qty, available: availableQty })
+      );
+      return;
+    }
+
+    const result = api.addCustomerItem({
+      customerId: selectedCustomerId,
+      zoneId: saleZoneId,
+      skuId: saleForm.skuId,
+      qty: Number(saleForm.qty),
+      timestamp: eventTs(10)
+    });
+    if (result.status === "zone_not_orderable") {
+      setSalesStatusMessage(t(lang, "zoneNotCommercial", { zoneId: saleZoneId }));
+    } else if (result.status === "insufficient_inventory") {
+      setSalesStatusMessage(
+        t(lang, "noStock", { requested: saleForm.qty, available: result.availableQty ?? 0 })
+      );
+    } else {
+      setSalesStatusMessage(t(lang, "itemAdded", { status: result.status }));
+    }
+    setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
+    refresh();
+  }
+
+  function checkoutCustomer(customerId = selectedCustomerId): void {
+    const result = api.checkoutCustomer({ customerId, timestamp: eventTs(20) });
+    setSalesStatusMessage(t(lang, "checkoutResult", { status: result.status, soldItems: result.soldItems }));
+    setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
+    refresh();
+  }
+
+  function removeCustomerItem(basketItemId: string): void {
+    const result = api.removeCustomerItem({ basketItemId, timestamp: eventTs(15) });
+    setSalesStatusMessage(t(lang, "itemRemoved", { status: result.status, restoredQty: result.restoredQty }));
+    setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
+    refresh();
+  }
+
+  function confirmReceivingOrder(orderId: string): void {
+    const order = pendingReceivingOrders.find((entry) => entry.id === orderId);
+    const result = api.confirmReceivingOrder({
+      orderId,
+      confirmedAt: eventTs(19),
+      confirmedBy: order?.assignedStaffId ?? activeStaff[0]?.id ?? "receiving-operator"
+    });
+    setReceivingStatusMessage(
+      t(lang, "receivingConfirmResult", {
+        status: result.status,
+        movedQty: result.movedQty ?? 0
+      })
+    );
+    refresh();
+  }
+
+  function upsertRule(): void {
+    if (selectedZone === "all") return;
+    if (Number(ruleForm.maxQty) < Number(ruleForm.minQty)) return;
+    api.upsertMinMaxRule({
+      zoneId: selectedZone,
+      skuId: ruleForm.skuId,
+      source: ruleForm.source,
+      minQty: Number(ruleForm.minQty),
+      maxQty: Number(ruleForm.maxQty)
+    });
+    refresh(selectedZone);
+  }
+
+  function deleteRule(ruleId: string): void {
+    const result = api.deleteRule(ruleId);
+    setSalesStatusMessage(t(lang, "ruleDelete", { status: result.status }));
+    refresh();
+  }
+
+  function resetRuleCenterForm(): void {
+    setRuleCenterForm({
+      zoneId: ALL_LOCATIONS_OPTION_ID,
+      selectorMode: "SKU",
+      skuId: sampleDataset.skus[0]?.id ?? "",
+      source: "RFID",
+      minQty: 1,
+      maxQty: 4,
+      priority: 1
+    });
+  }
+
+  function openCreateRuleForm(): void {
+    resetRuleCenterForm();
+    setRulesFormMode("create");
+  }
+
+  function closeRuleForm(): void {
+    resetRuleCenterForm();
+    setRulesFormMode("closed");
+  }
+
+  function editRuleTemplate(template: MinMaxRuleTemplate): void {
+    setRuleCenterForm({
+      id: template.id,
+      zoneId: template.scope === "GENERIC" ? ALL_LOCATIONS_OPTION_ID : (template.zoneId ?? ALL_LOCATIONS_OPTION_ID),
+      selectorMode: template.selectorMode,
+      skuId: template.skuId ?? "",
+      source: template.source,
+      minQty: template.minQty,
+      maxQty: template.maxQty,
+      priority: template.priority,
+      kit: template.attributes?.kit,
+      ageGroup: template.attributes?.ageGroup,
+      gender: template.attributes?.gender,
+      role: template.attributes?.role,
+      quality: template.attributes?.quality
+    });
+    setRulesFormMode("edit");
+  }
+
+  function saveRuleTemplateFromCenter(): void {
+    if (ruleCenterForm.maxQty < ruleCenterForm.minQty) return;
+    const isGenericRule = ruleCenterForm.zoneId === ALL_LOCATIONS_OPTION_ID;
+    const result = api.upsertMinMaxRuleTemplate({
+      id: ruleCenterForm.id,
+      scope: isGenericRule ? "GENERIC" : "LOCATION",
+      zoneId: isGenericRule ? undefined : ruleCenterForm.zoneId,
+      selectorMode: ruleCenterForm.selectorMode,
+      skuId: ruleCenterForm.selectorMode === "SKU" ? ruleCenterForm.skuId : undefined,
+      attributes:
+        ruleCenterForm.selectorMode === "ATTRIBUTES"
+          ? {
+              kit: ruleCenterForm.kit,
+              ageGroup: ruleCenterForm.ageGroup,
+              gender: ruleCenterForm.gender,
+              role: ruleCenterForm.role,
+              quality: ruleCenterForm.quality
+            }
+          : undefined,
+      source: ruleCenterForm.source,
+      minQty: Number(ruleCenterForm.minQty),
+      maxQty: Number(ruleCenterForm.maxQty),
+      priority: Number(ruleCenterForm.priority)
+    });
+    setSalesStatusMessage(t(lang, "ruleTemplateSaveStatus", { status: result.status }));
+    if (result.status === "created" || result.status === "updated") {
+      closeRuleForm();
+    }
+    refresh();
+  }
+
+  function removeRuleTemplate(templateId: string): void {
+    const result = api.deleteMinMaxRuleTemplate(templateId);
+    setSalesStatusMessage(t(lang, "ruleTemplateDeleteStatus", { status: result.status }));
+    refresh();
+  }
+
+  function saveLocationSettings(): void {
+    if (selectedZone === "all") return;
+    api.updateLocation({
+      zoneId: selectedZone,
+      name: zoneEditForm.name,
+      color: zoneEditForm.color,
+      isSalesLocation: zoneEditForm.isSalesLocation,
+      replenishmentSources: sourceEditor
+    });
+    setPreviewZoneColor(null);
+    setMapEditMode(false);
+    releaseDragVertex();
+    refresh(selectedZone);
+  }
+
+  function addSourceRow(): void {
+    if (selectedZone === "all" || !selectedLocation) return;
+    const candidates = sourceEditorOptions.filter(
+      (entry) => !sourceEditor.some((source) => source.sourceZoneId === entry.id)
+    );
+    if (candidates.length === 0) return;
+    const nextSort = sourceEditor.length + 1;
+    setSourceEditor((prev) => [...prev, { sourceZoneId: candidates[0].id, sortOrder: nextSort }]);
+  }
+
+  function reorderSourceLocations(fromIndex: number, toIndex: number): void {
+    if (fromIndex === toIndex) return;
+    setSourceEditor((prev) => {
+      if (
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= prev.length ||
+        toIndex >= prev.length
+      ) {
+        return prev;
+      }
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next.map((entry, index) => ({ ...entry, sortOrder: index + 1 }));
+    });
+  }
+
+  function onSourceDragStart(index: number): void {
+    setDragSourceIndex(index);
+  }
+
+  function onSourceDragOver(event: ReactDragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+  }
+
+  function onSourceDrop(targetIndex: number): void {
+    if (dragSourceIndex === null) return;
+    reorderSourceLocations(dragSourceIndex, targetIndex);
+    setDragSourceIndex(null);
+  }
+
+  function onSourceDragEnd(): void {
+    setDragSourceIndex(null);
+  }
+
+  function updateStaffZoneScope(
+    staffId: string,
+    scopeAllZones: boolean,
+    zoneScopeZoneIds: string[]
+  ): void {
+    api.updateStaffScope({ staffId, scopeAllZones, zoneScopeZoneIds });
+    refresh();
+  }
+
+  function confirmTask(
+    taskId: string,
+    deficitQty: number,
+    sourceZoneId?: string,
+    confirmedBy?: string
+  ): void {
+    api.confirmReplenishmentTask(taskId, {
+      confirmedQty: deficitQty,
+      confirmedBy: confirmedBy ?? activeStaff[0]?.id ?? "associate-12",
+      confirmedAt: eventTs(25),
+      sourceZoneId
+    });
+    refresh();
+  }
+
+  function startTask(taskId: string, staffId?: string): void {
+    const by = staffId ?? activeStaff[0]?.id;
+    if (!by) return;
+    api.startTask({
+      taskId,
+      staffId: by,
+      at: eventTs(24)
+    });
+    refresh();
+  }
+
+  function removeTaskHubFilter(key: TaskHubFilterKey): void {
+    if (key === "TYPE") {
+      setTaskHubTypeFilters([]);
+      return;
+    }
+    if (key === "DESTINATION") {
+      setTaskHubLocationFilters([]);
+      return;
+    }
+    setTaskHubStatusFilters([]);
+  }
+
+  function clearTaskHubFilters(): void {
+    setTaskHubTypeFilters([]);
+    setTaskHubLocationFilters([]);
+    setTaskHubStatusFilters([]);
+    setTaskHubPendingFilterKey("");
+    setTaskHubFilterSearch("");
+  }
+
+  function toggleTaskHubPendingOption(optionId: string): void {
+    if (!taskHubPendingFilterKey) return;
+    if (taskHubPendingFilterKey === "TYPE") {
+      setTaskHubTypeFilters((prev) =>
+        prev.includes(optionId as TaskTypeValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as TaskTypeValue]
+      );
+    } else if (taskHubPendingFilterKey === "DESTINATION") {
+      setTaskHubLocationFilters((prev) =>
+        prev.includes(optionId)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId]
+      );
+    } else {
+      setTaskHubStatusFilters((prev) =>
+        prev.includes(optionId as TaskStatusValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as TaskStatusValue]
+      );
+    }
+    // Shopify-like UX: once an option is selected, close picker and return CTA to "Add filter"
+    setTaskHubPendingFilterKey("");
+    setTaskHubFilterSearch("");
+  }
+
+  function isTaskHubPendingOptionSelected(optionId: string): boolean {
+    if (!taskHubPendingFilterKey) return false;
+    if (taskHubPendingFilterKey === "TYPE") return taskHubTypeFilters.includes(optionId as TaskTypeValue);
+    if (taskHubPendingFilterKey === "DESTINATION") return taskHubLocationFilters.includes(optionId);
+    return taskHubStatusFilters.includes(optionId as TaskStatusValue);
+  }
+
+  function removeCatalogFilter(key: CatalogFilterKey): void {
+    if (key === "SOURCE") {
+      setCatalogSourceFilters([]);
+      return;
+    }
+    if (key === "KIT") {
+      setCatalogKitFilters([]);
+      return;
+    }
+    if (key === "AGE_GROUP") {
+      setCatalogAgeGroupFilters([]);
+      return;
+    }
+    if (key === "GENDER") {
+      setCatalogGenderFilters([]);
+      return;
+    }
+    if (key === "ROLE") {
+      setCatalogRoleFilters([]);
+      return;
+    }
+    setCatalogQualityFilters([]);
+  }
+
+  function clearCatalogFilters(): void {
+    setCatalogSourceFilters([]);
+    setCatalogKitFilters([]);
+    setCatalogAgeGroupFilters([]);
+    setCatalogGenderFilters([]);
+    setCatalogRoleFilters([]);
+    setCatalogQualityFilters([]);
+    setCatalogPendingFilterKey("");
+    setCatalogFilterSearch("");
+  }
+
+  function toggleCatalogPendingOption(optionId: string): void {
+    if (!catalogPendingFilterKey) return;
+    if (catalogPendingFilterKey === "SOURCE") {
+      setCatalogSourceFilters((prev) =>
+        prev.includes(optionId as CatalogSourceFilterValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as CatalogSourceFilterValue]
+      );
+    } else if (catalogPendingFilterKey === "KIT") {
+      setCatalogKitFilters((prev) =>
+        prev.includes(optionId as CatalogKitValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as CatalogKitValue]
+      );
+    } else if (catalogPendingFilterKey === "AGE_GROUP") {
+      setCatalogAgeGroupFilters((prev) =>
+        prev.includes(optionId as CatalogAgeGroupValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as CatalogAgeGroupValue]
+      );
+    } else if (catalogPendingFilterKey === "GENDER") {
+      setCatalogGenderFilters((prev) =>
+        prev.includes(optionId as CatalogGenderValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as CatalogGenderValue]
+      );
+    } else if (catalogPendingFilterKey === "ROLE") {
+      setCatalogRoleFilters((prev) =>
+        prev.includes(optionId as CatalogRoleValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as CatalogRoleValue]
+      );
+    } else {
+      setCatalogQualityFilters((prev) =>
+        prev.includes(optionId as CatalogQualityValue)
+          ? prev.filter((value) => value !== optionId)
+          : [...prev, optionId as CatalogQualityValue]
+      );
+    }
+    // Shopify-like UX: once an option is selected, close picker and return CTA to "Add filter"
+    setCatalogPendingFilterKey("");
+    setCatalogFilterSearch("");
+  }
+
+  function isCatalogPendingOptionSelected(optionId: string): boolean {
+    if (!catalogPendingFilterKey) return false;
+    if (catalogPendingFilterKey === "SOURCE") return catalogSourceFilters.includes(optionId as CatalogSourceFilterValue);
+    if (catalogPendingFilterKey === "KIT") return catalogKitFilters.includes(optionId as CatalogKitValue);
+    if (catalogPendingFilterKey === "AGE_GROUP") return catalogAgeGroupFilters.includes(optionId as CatalogAgeGroupValue);
+    if (catalogPendingFilterKey === "GENDER") return catalogGenderFilters.includes(optionId as CatalogGenderValue);
+    if (catalogPendingFilterKey === "ROLE") return catalogRoleFilters.includes(optionId as CatalogRoleValue);
+    return catalogQualityFilters.includes(optionId as CatalogQualityValue);
+  }
+
+  function focusSkuOnMap(skuId: string): void {
+    setCatalogMapSkuId(skuId);
+  }
+
+  function renderRuleEditor(): JSX.Element {
+    return (
+      <>
+        {ruleCenterForm.id ? (
+          <p className="drawer-subtitle">{t(lang, "rulesHubEditing", { id: ruleCenterForm.id })}</p>
+        ) : null}
+        <div className="form-grid">
+          <label>
+            {t(lang, "rulesHubLocation")}
+            <select
+              value={ruleCenterForm.zoneId}
+              onChange={(e) => setRuleCenterForm((prev) => ({ ...prev, zoneId: e.target.value }))}
+            >
+              <option value={ALL_LOCATIONS_OPTION_ID}>{t(lang, "allZonesGlobal")}</option>
+              {ruleLocationOptions.map((location) => (
+                <option key={`rule-location-${location.id}`} value={location.id}>
+                  {location.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(lang, "source")}
+            <select
+              value={ruleCenterForm.source}
+              onChange={(e) =>
+                setRuleCenterForm((prev) => ({
+                  ...prev,
+                  source: e.target.value as InventorySource
+                }))
+              }
+            >
+              <option value="RFID">RFID</option>
+              <option value="NON_RFID">NON_RFID</option>
+            </select>
+          </label>
+          <label>
+            {t(lang, "rulesHubSelector")}
+            <select
+              value={ruleCenterForm.selectorMode}
+              onChange={(e) =>
+                setRuleCenterForm((prev) => ({
+                  ...prev,
+                  selectorMode: e.target.value as RuleTemplateSelectorMode
+                }))
+              }
+            >
+              <option value="SKU">{t(lang, "rulesHubSelectorSku")}</option>
+              <option value="ATTRIBUTES">{t(lang, "rulesHubSelectorAttributes")}</option>
+            </select>
+          </label>
+          {ruleCenterForm.selectorMode === "SKU" ? (
+            <label>
+              {t(lang, "sku")}
+              <select
+                value={ruleCenterForm.skuId}
+                onChange={(e) => setRuleCenterForm((prev) => ({ ...prev, skuId: e.target.value }))}
+              >
+                {rulesSkuOptions.map((option) => (
+                  <option key={`rule-sku-${option.id}`} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <>
+              <label>
+                {t(lang, "catalogKit")}
+                <select
+                  value={ruleCenterForm.kit ?? ""}
+                  onChange={(e) =>
+                    setRuleCenterForm((prev) => ({ ...prev, kit: (e.target.value || undefined) as CatalogKitValue | undefined }))
+                  }
+                >
+                  <option value="">{t(lang, "any")}</option>
+                  {rulesAttrKitOptions.map((value) => (
+                    <option key={`rule-kit-${value}`} value={value}>{t(lang, `catalogValue_${value}`)}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {t(lang, "catalogAgeGroup")}
+                <select
+                  value={ruleCenterForm.ageGroup ?? ""}
+                  onChange={(e) =>
+                    setRuleCenterForm((prev) => ({ ...prev, ageGroup: (e.target.value || undefined) as CatalogAgeGroupValue | undefined }))
+                  }
+                >
+                  <option value="">{t(lang, "any")}</option>
+                  {rulesAttrAgeOptions.map((value) => (
+                    <option key={`rule-age-${value}`} value={value}>{t(lang, `catalogValue_${value}`)}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {t(lang, "catalogGender")}
+                <select
+                  value={ruleCenterForm.gender ?? ""}
+                  onChange={(e) =>
+                    setRuleCenterForm((prev) => ({ ...prev, gender: (e.target.value || undefined) as CatalogGenderValue | undefined }))
+                  }
+                >
+                  <option value="">{t(lang, "any")}</option>
+                  {rulesAttrGenderOptions.map((value) => (
+                    <option key={`rule-gender-${value}`} value={value}>{t(lang, `catalogValue_${value}`)}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {t(lang, "catalogRole")}
+                <select
+                  value={ruleCenterForm.role ?? ""}
+                  onChange={(e) =>
+                    setRuleCenterForm((prev) => ({ ...prev, role: (e.target.value || undefined) as CatalogRoleValue | undefined }))
+                  }
+                >
+                  <option value="">{t(lang, "any")}</option>
+                  {rulesAttrRoleOptions.map((value) => (
+                    <option key={`rule-role-${value}`} value={value}>{t(lang, `catalogValue_${value}`)}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {t(lang, "catalogQuality")}
+                <select
+                  value={ruleCenterForm.quality ?? ""}
+                  onChange={(e) =>
+                    setRuleCenterForm((prev) => ({ ...prev, quality: (e.target.value || undefined) as CatalogQualityValue | undefined }))
+                  }
+                >
+                  <option value="">{t(lang, "any")}</option>
+                  {rulesAttrQualityOptions.map((value) => (
+                    <option key={`rule-quality-${value}`} value={value}>{t(lang, `catalogValue_${value}`)}</option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+          <label>
+            {t(lang, "min")}
+            <input
+              type="number"
+              min={0}
+              value={ruleCenterForm.minQty}
+              onChange={(e) => setRuleCenterForm((prev) => ({ ...prev, minQty: Number(e.target.value) }))}
+            />
+          </label>
+          <label>
+            {t(lang, "max")}
+            <input
+              type="number"
+              min={0}
+              value={ruleCenterForm.maxQty}
+              onChange={(e) => setRuleCenterForm((prev) => ({ ...prev, maxQty: Number(e.target.value) }))}
+            />
+          </label>
+          <label>
+            {t(lang, "rulesHubPriority")}
+            <input
+              type="number"
+              min={1}
+              max={99}
+              value={ruleCenterForm.priority}
+              onChange={(e) => setRuleCenterForm((prev) => ({ ...prev, priority: Number(e.target.value) }))}
+            />
+          </label>
+        </div>
+        <p className="drawer-subtitle">
+          {t(lang, "rulesHubMatches", { count: ruleCenterMatchedSkuIds.length })}
+        </p>
+        <div className="panel-head-actions">
+          <button
+            className="action-btn"
+            disabled={ruleCenterForm.selectorMode === "SKU" && !ruleCenterForm.skuId}
+            onClick={saveRuleTemplateFromCenter}
+          >
+            {ruleCenterForm.id ? t(lang, "rulesHubSaveChanges") : t(lang, "applyRule")}
+          </button>
+          <button className="inline-btn" onClick={closeRuleForm}>{t(lang, "close")}</button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <main className="page-shell">
+      <header className="hero">
+        <div>
+          <p className="eyebrow">{t(lang, "appEyebrow")}</p>
+          <h1>{t(lang, "appTitle")}</h1>
+        </div>
+        <div className="hero-actions hero-actions--stack">
+          <div className="lang-switch" role="group" aria-label="Language selector">
+            <label htmlFor="lang-select" className="lang-switch-label">Lang</label>
+            <select
+              id="lang-select"
+              className="lang-select"
+              value={lang}
+              onChange={(e) => setLang(e.target.value as Lang)}
+            >
+              {(["ca", "es", "en"] as Lang[]).map((option) => (
+                <option key={option} value={option}>
+                  {LANG_FLAGS[option]} - {LANG_LABELS[option]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div ref={headerMenuRef} className="header-menu-wrap">
+            <button
+              className="hamburger-btn"
+              aria-label="Open main menu"
+              aria-expanded={showHeaderMenu}
+              onClick={() => setShowHeaderMenu((prev) => !prev)}
+            >
+              <span />
+              <span />
+              <span />
+            </button>
+            {showHeaderMenu ? (
+              <div className="header-menu-popover">
+                <button className="header-menu-item" onClick={openStaffMainView}>
+                  {t(lang, "staff")}
+                </button>
+                <button className="header-menu-item" onClick={openAnalyticsMainView}>
+                  {t(lang, "analytics")}
+                </button>
+                <button className="header-menu-item" onClick={openCatalogMainView}>
+                  {t(lang, "catalog")}
+                </button>
+                <button className="header-menu-item header-menu-item--with-badge" onClick={openTasksMainView}>
+                  {t(lang, "tasks")}
+                  {openUnifiedTaskCount > 0 ? <span className="task-badge">{openUnifiedTaskCount}</span> : null}
+                </button>
+                <button className="header-menu-item" onClick={openRulesMainView}>
+                  {t(lang, "rules")}
+                </button>
+                <button
+                  className="header-menu-item header-menu-item--with-badge"
+                  onClick={() => {
+                    setShowHeaderMenu(false);
+                    closeZoneDrawer();
+                    setShowRfidDrawer(false);
+                    if (!showSalesDrawer) {
+                      resetSalesFormOnOpen();
+                    }
+                    setShowSalesDrawer((v) => !v);
+                  }}
+                >
+                  {t(lang, "sales")}
+                  {salesInProgressCount > 0 ? <span className="task-badge">{salesInProgressCount}</span> : null}
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
+                    setShowHeaderMenu(false);
+                    closeZoneDrawer();
+                    setShowSalesDrawer(false);
+                    setShowRfidDrawer((v) => !v);
+                  }}
+                >
+                  RFID
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </header>
+
+      <section className="kpi-grid">
+        <article className="kpi-card"><span>{t(lang, "zones")}</span><strong>{totals.zones}</strong></article>
+        <article className="kpi-card"><span>{t(lang, "totalUnits")}</span><strong>{totals.totalUnits}</strong></article>
+        <article className="kpi-card"><span>{t(lang, "rfidUnits")}</span><strong>{totals.rfidUnits}</strong></article>
+        <article className="kpi-card"><span>{t(lang, "nonRfidUnits")}</span><strong>{totals.nonRfidUnits}</strong></article>
+        <article className={totals.openTasks > 0 ? "kpi-card kpi-card--alert" : "kpi-card"}><span>{t(lang, "openTasks")}</span><strong>{totals.openTasks}</strong></article>
+        <article className="kpi-card"><span>{t(lang, "lowStockZones")}</span><strong>{totals.lowStockZones}</strong></article>
+      </section>
+
+      <section className="layout-grid layout-grid--single">
+        {mainContentView === "map" ? (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "shopfloorDigitalTwin")}</h2>
+              <div className="map-panel-actions">
+                <button className="action-btn" onClick={startCreateZone}>
+                  + {t(lang, "newLocation")}
+                </button>
+              </div>
+            </div>
+            <div className="zone-tabs">
+                <button
+                  key="all-zones"
+                  className={selectedZone === "all" ? "tab tab--active" : "tab"}
+                  onClick={() => selectZone("all")}
+                >
+                  {t(lang, "allZones")}
+                </button>
+                {zoneOrder.map((zoneId) => {
+                  const zoneKpi = dashboard.zones.find((z) => z.zoneId === zoneId);
+                  const location = locations.find((entry) => entry.id === zoneId);
+                  const low = (zoneKpi?.lowStockCount ?? 0) > 0;
+                  return (
+                  <button
+                    key={zoneId}
+                    className={zoneId === selectedZone ? "tab tab--active" : "tab"}
+                    onClick={() => selectZoneFromMapInteraction(zoneId)}
+                  >
+                    {location?.name ?? shortZone(zoneId)}
+                    {low ? <span className="warn-icon" title={t(lang, "belowThreshold")}>⚠</span> : null}
+                  </button>
+                  );
+                })}
+              </div>
+
+            <div className="zone-units-banner">
+              <strong>{selectedZone === "all" ? t(lang, "allZones") : selectedLocation?.name ?? selectedZone}</strong>
+              <span>{t(lang, "totalUnits")}: {selectedZoneUnits.total} {t(lang, "unitsSuffix")}</span>
+              <span>{t(lang, "rfidUnits")}: {selectedZoneUnits.rfid} {t(lang, "unitsSuffix")}</span>
+              <span>{t(lang, "nonRfidUnits")}: {selectedZoneUnits.nonRfid} {t(lang, "unitsSuffix")}</span>
+            </div>
+
+            <div
+              ref={mapViewportRef}
+              className={
+                "map-canvas-wrap" +
+                (isMapPanning ? " map-canvas-wrap--panning" : mapZoom > 1 && !mapEditMode ? " map-canvas-wrap--draggable" : "")
+              }
+              onWheel={onMapWheelZoom}
+              onWheelCapture={onMapWheelZoom}
+              onPointerDown={startMapPan}
+              onPointerMove={moveMapPan}
+              onPointerUp={endMapPan}
+              onPointerLeave={endMapPan}
+              onPointerCancel={endMapPan}
+            >
+            <div className="map-zoom-controls" role="group" aria-label="Map zoom controls">
+              <button
+                className="map-zoom-btn"
+                type="button"
+                aria-label={t(lang, "zoomIn")}
+                title={t(lang, "zoomIn")}
+                onClick={zoomInMap}
+              >
+                +
+              </button>
+              <button
+                className="map-zoom-btn"
+                type="button"
+                aria-label={t(lang, "zoomOut")}
+                title={t(lang, "zoomOut")}
+                onClick={zoomOutMap}
+              >
+                -
+              </button>
+              <button
+                className="map-zoom-btn map-zoom-btn--reset"
+                type="button"
+                aria-label={t(lang, "zoomReset")}
+                title={t(lang, "zoomReset")}
+                onClick={resetMapZoom}
+              >
+                1:1
+              </button>
+              <button
+                className="map-zoom-btn map-zoom-btn--toggle"
+                type="button"
+                aria-label={showMapZones ? t(lang, "hideZonesOnMap") : t(lang, "showZonesOnMap")}
+                title={showMapZones ? t(lang, "hideZonesOnMap") : t(lang, "showZonesOnMap")}
+                onClick={() => setShowMapZones((prev) => !prev)}
+              >
+                <span
+                  className={showMapZones ? "map-eye-icon" : "map-eye-icon map-eye-icon--off"}
+                  aria-hidden="true"
+                >
+                  👁
+                </span>
+              </button>
+            </div>
+            <svg
+              ref={svgRef}
+              className={mapEditMode ? "shopfloor shopfloor--editing" : "shopfloor"}
+              style={{ transform: `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})`, transformOrigin: "top left" }}
+              viewBox={`0 0 ${SHOPFLOOR_SIZE.width} ${SHOPFLOOR_SIZE.height}`}
+              role="img"
+              aria-label="Shopfloor map"
+              onPointerDown={addPolygonPoint}
+              onPointerMove={updateDraggedVertex}
+              onPointerUp={releaseDragVertex}
+              onPointerLeave={releaseDragVertex}
+              onPointerCancel={releaseDragVertex}
+            >
+              <defs>
+                <radialGradient id="pulse" cx="50%" cy="50%" r="55%">
+                  <stop offset="0%" stopColor="#5eead4" stopOpacity="0.55" />
+                  <stop offset="100%" stopColor="#0f172a" stopOpacity="0" />
+                </radialGradient>
+              </defs>
+
+              <image href="/shopfloor-map.png" x="0" y="0" width={SHOPFLOOR_SIZE.width} height={SHOPFLOOR_SIZE.height} preserveAspectRatio="none" />
+              <rect x="10" y="10" width="1516" height="1097" fill="transparent" stroke="#404040" strokeWidth="6" rx="8" />
+
+              {showMapZones ? locations.map((zone) => {
+                const kpi = dashboard.zones.find((z) => z.zoneId === zone.id);
+                const selected = selectedZone !== "all" && zone.id === selectedZone;
+                const hovered = hoverZoneId === zone.id;
+                const low = (kpi?.lowStockCount ?? 0) > 0;
+                const zoneInventory = kpi?.inventory ?? [];
+                const hoverRfidQty = zoneInventory
+                  .filter((item) => item.source === "RFID")
+                  .reduce((sum, item) => sum + item.qty, 0);
+                const hoverNonRfidQty = zoneInventory
+                  .filter((item) => item.source === "NON_RFID")
+                  .reduce((sum, item) => sum + item.qty, 0);
+                const zoneColor = selected && previewZoneColor ? previewZoneColor : zone.color;
+                const renderedPolygon =
+                  mapEditMode && !createMode && selected ? draftPolygon : zone.mapPolygon;
+                const safePolygon = renderedPolygon.length > 0 ? renderedPolygon : zone.mapPolygon;
+                const anchorPoint = safePolygon[0] ?? { x: 0, y: 0 };
+                const warningX = Math.max(...safePolygon.map((point) => point.x)) - 16;
+                const warningY = Math.min(...safePolygon.map((point) => point.y)) + 14;
+                const centerPoint = polygonCenter(safePolygon);
+
+                return (
+                  <g
+                    key={zone.id}
+                    className="map-zone-group"
+                    onPointerEnter={() => setHoverZoneId(zone.id as InventoryZoneId)}
+                    onPointerLeave={() => setHoverZoneId((current) => (current === zone.id ? null : current))}
+                  >
+                    <polygon
+                      points={polygonToPoints(safePolygon)}
+                      className={selected ? "zone-overlay zone-overlay--selected zone-overlay--clickable" : "zone-overlay zone-overlay--clickable"}
+                      style={{ fill: `${zoneColor}33`, stroke: zoneColor }}
+                      onClick={() => selectZoneFromMapInteraction(zone.id as InventoryZoneId)}
+                    />
+                    <text x={anchorPoint.x + 14} y={anchorPoint.y + 26} className="zone-label">
+                      {zone.name}
+                    </text>
+                    {low ? (
+                      <g className="zone-warning-icon">
+                        <path d={`M ${warningX} ${warningY - 11} L ${warningX - 10} ${warningY + 9} L ${warningX + 10} ${warningY + 9} Z`} />
+                        <text x={warningX - 2.4} y={warningY + 6}>!</text>
+                      </g>
+                    ) : null}
+                    {hovered ? (
+                      <g className="zone-hover-card">
+                        <rect
+                          x={Math.min(anchorPoint.x + 13, SHOPFLOOR_SIZE.width - 191)}
+                          y={Math.max(15, anchorPoint.y + 39)}
+                          width="188"
+                          height="94"
+                          rx="14"
+                          className="zone-hover-card-shadow"
+                        />
+                        <rect
+                          x={Math.min(anchorPoint.x + 8, SHOPFLOOR_SIZE.width - 176)}
+                          y={Math.max(10, anchorPoint.y + 32)}
+                          width="188"
+                          height="94"
+                          rx="14"
+                          style={{ fill: `${zoneColor}e6`, stroke: "rgba(15,23,42,0.95)" }}
+                        />
+                        <text className="zone-hover-card-title" x={Math.min(anchorPoint.x + 18, SHOPFLOOR_SIZE.width - 166)} y={Math.max(30, anchorPoint.y + 52)}>
+                          {zone.name}
+                        </text>
+                        <text className="zone-hover-card-value" x={Math.min(anchorPoint.x + 18, SHOPFLOOR_SIZE.width - 166)} y={Math.max(50, anchorPoint.y + 74)}>
+                          {t(lang, "rfidUnits")}: {hoverRfidQty}
+                        </text>
+                        <text className="zone-hover-card-value" x={Math.min(anchorPoint.x + 18, SHOPFLOOR_SIZE.width - 166)} y={Math.max(70, anchorPoint.y + 94)}>
+                          {t(lang, "nonRfidUnits")}: {hoverNonRfidQty}
+                        </text>
+                      </g>
+                    ) : null}
+                  </g>
+                );
+              }) : null}
+
+              {createMode && newZonePolygon.length > 1 ? (
+                <g className="map-zone-group">
+                  <polygon
+                    points={polygonToPoints(newZonePolygon)}
+                    className="zone-overlay zone-overlay--selected"
+                    style={{ fill: `${newZoneForm.color}33`, stroke: newZoneForm.color, strokeDasharray: "8 4" }}
+                    onPointerDown={(evt) => {
+                      evt.stopPropagation();
+                      evt.currentTarget.setPointerCapture(evt.pointerId);
+                      setIsDraggingVertex(true);
+                      setDragPolygonStart(getSvgCoords(evt));
+                    }}
+                  />
+                  <text x={newZonePolygon[0].x + 14} y={newZonePolygon[0].y + 26} className="zone-label">
+                    {newZoneForm.name}
+                  </text>
+                </g>
+              ) : null}
+
+              {mapEditMode && selectedZone !== "all"
+                ? draftPolygon.map((point, index) => (
+                    <g key={`vertex-${index}`}>
+                      <circle
+                        cx={point.x}
+                        cy={point.y}
+                        r="8"
+                        className="polygon-vertex"
+                        onPointerDown={(evt) => {
+                          evt.stopPropagation();
+                          evt.currentTarget.setPointerCapture(evt.pointerId);
+                          setDragVertexIndex(index);
+                          setDragTarget("existing");
+                          setIsDraggingVertex(true);
+                        }}
+                      />
+                      <text className="polygon-vertex-label" x={point.x + 10} y={point.y - 10}>{index + 1}</text>
+                    </g>
+                  ))
+                : null}
+
+              {mapEditMode && createMode
+                ? newZonePolygon.map((point, index) => (
+                    <g key={`new-vertex-${index}`}>
+                      <circle
+                        cx={point.x}
+                        cy={point.y}
+                        r="8"
+                        className="polygon-vertex polygon-vertex--new"
+                        onPointerDown={(evt) => {
+                          evt.stopPropagation();
+                          evt.currentTarget.setPointerCapture(evt.pointerId);
+                          setDragVertexIndex(index);
+                          setDragTarget("new");
+                          setIsDraggingVertex(true);
+                        }}
+                      />
+                      <text className="polygon-vertex-label" x={point.x + 10} y={point.y - 10}>{index + 1}</text>
+                    </g>
+                  ))
+                : null}
+            </svg>
+            </div>
+          </article>
+        ) : mainContentView === "staff" ? (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "staff")}</h2>
+              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
+            </div>
+            <div className="inventory-available-list">
+              {staff.map((member) => (
+                <div key={member.id} className="inventory-available-item">
+                  <div>
+                    <strong>{member.name}</strong>
+                    <small>{member.role} · {member.shiftLabel}</small>
+                  </div>
+                  <div className="staff-item-actions">
+                    <button
+                      className="inline-btn"
+                      onClick={() => {
+                        api.updateStaffShift({ staffId: member.id, activeShift: !member.activeShift });
+                        refresh();
+                      }}
+                    >
+                      {member.activeShift ? t(lang, "setOffShift") : t(lang, "setActive")}
+                    </button>
+                    <div className="staff-scope-wrap">
+                      <label className="staff-scope-option">
+                        <input
+                          type="checkbox"
+                          checked={member.scopeAllZones}
+                          onChange={(e) =>
+                            updateStaffZoneScope(
+                              member.id,
+                              e.target.checked,
+                              member.zoneScopeZoneIds
+                            )
+                          }
+                        />
+                        {t(lang, "allZonesScope")}
+                      </label>
+                      {!member.scopeAllZones ? (
+                        <div className="staff-scope-list">
+                          {locations.map((zone) => (
+                            <label key={`${member.id}-${zone.id}`} className="staff-scope-option">
+                              <input
+                                type="checkbox"
+                                checked={member.zoneScopeZoneIds.includes(zone.id)}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...member.zoneScopeZoneIds, zone.id]
+                                    : member.zoneScopeZoneIds.filter((id) => id !== zone.id);
+                                  updateStaffZoneScope(member.id, false, Array.from(new Set(next)));
+                                }}
+                              />
+                              {zone.name}
+                            </label>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+        ) : mainContentView === "catalog" ? (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "catalogTitle")}</h2>
+              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
+            </div>
+            <p className="drawer-subtitle">{t(lang, "catalogSubtitle")}</p>
+            <div className="control-group">
+              <div className="task-filter-bar">
+                <div className="task-filter-chip-list">
+                  {catalogActiveFilters.map((filter) => (
+                    <div key={`catalog-filter-chip-${filter.key}`} className="task-filter-anchor">
+                      <button
+                        type="button"
+                        className="task-filter-chip"
+                        onClick={() => {
+                          setCatalogPendingFilterKey(filter.key);
+                          setCatalogFilterSearch("");
+                        }}
+                        title="Edit filter"
+                      >
+                        {filter.label}: {filter.valueLabel}
+                        <span
+                          className="task-filter-chip-close-inline"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            removeCatalogFilter(filter.key);
+                          }}
+                          aria-hidden="true"
+                          title="Remove filter"
+                        >
+                          ×
+                        </span>
+                      </button>
+                      {catalogPendingFilterKey === filter.key ? (
+                        <div className="task-filter-picker">
+                          <input
+                            className="task-filter-search"
+                            placeholder={t(lang, "taskFilterSearchPlaceholder")}
+                            value={catalogFilterSearch}
+                            onChange={(e) => setCatalogFilterSearch(e.target.value)}
+                          />
+                          <div className="task-filter-option-list">
+                            {catalogPendingOptions.map((option) => (
+                              <label key={`catalog-filter-option-${catalogPendingFilterKey}-${option.id}`} className="task-filter-option">
+                                <input
+                                  type="checkbox"
+                                  checked={isCatalogPendingOptionSelected(option.id)}
+                                  onChange={() => toggleCatalogPendingOption(option.id)}
+                                />
+                                <span>{option.label}</span>
+                              </label>
+                            ))}
+                            {catalogPendingOptions.length === 0 ? (
+                              <p className="empty">{t(lang, "taskFilterNoOptions")}</p>
+                            ) : null}
+                          </div>
+                          <button className="task-filter-clear" onClick={() => removeCatalogFilter(catalogPendingFilterKey as CatalogFilterKey)}>
+                            {t(lang, "taskFilterClear")}
+                          </button>
+                          <button
+                            className="inline-btn"
+                            onClick={() => {
+                              setCatalogPendingFilterKey("");
+                              setCatalogFilterSearch("");
+                            }}
+                          >
+                            {t(lang, "close")}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                  <div className="task-filter-anchor">
+                    {catalogAddableFilterKeys.length > 0 ? (
+                      <select
+                        className="task-filter-add"
+                        value={catalogPendingFilterKey}
+                        onChange={(e) => {
+                          setCatalogPendingFilterKey(e.target.value as CatalogFilterKey | "");
+                          setCatalogFilterSearch("");
+                        }}
+                      >
+                        <option value="">{t(lang, "taskFilterAdd")}</option>
+                        {catalogAddableFilterKeys.includes("SOURCE") ? <option value="SOURCE">{t(lang, "catalogSourceLabel")}</option> : null}
+                        {catalogAddableFilterKeys.includes("KIT") ? <option value="KIT">{t(lang, "catalogKit")}</option> : null}
+                        {catalogAddableFilterKeys.includes("AGE_GROUP") ? <option value="AGE_GROUP">{t(lang, "catalogAgeGroup")}</option> : null}
+                        {catalogAddableFilterKeys.includes("GENDER") ? <option value="GENDER">{t(lang, "catalogGender")}</option> : null}
+                        {catalogAddableFilterKeys.includes("ROLE") ? <option value="ROLE">{t(lang, "catalogRole")}</option> : null}
+                        {catalogAddableFilterKeys.includes("QUALITY") ? <option value="QUALITY">{t(lang, "catalogQuality")}</option> : null}
+                      </select>
+                    ) : null}
+                    {catalogPendingFilterKey && catalogAddableFilterKeys.includes(catalogPendingFilterKey as CatalogFilterKey) ? (
+                      <div className="task-filter-picker">
+                        <input
+                          className="task-filter-search"
+                          placeholder={t(lang, "taskFilterSearchPlaceholder")}
+                          value={catalogFilterSearch}
+                          onChange={(e) => setCatalogFilterSearch(e.target.value)}
+                        />
+                        <div className="task-filter-option-list">
+                          {catalogPendingOptions.map((option) => (
+                            <label key={`catalog-filter-option-${catalogPendingFilterKey}-${option.id}`} className="task-filter-option">
+                              <input
+                                type="checkbox"
+                                checked={isCatalogPendingOptionSelected(option.id)}
+                                onChange={() => toggleCatalogPendingOption(option.id)}
+                              />
+                              <span>{option.label}</span>
+                            </label>
+                          ))}
+                          {catalogPendingOptions.length === 0 ? (
+                            <p className="empty">{t(lang, "taskFilterNoOptions")}</p>
+                          ) : null}
+                        </div>
+                        <button className="task-filter-clear" onClick={() => removeCatalogFilter(catalogPendingFilterKey as CatalogFilterKey)}>
+                          {t(lang, "taskFilterClear")}
+                        </button>
+                        <button
+                          className="inline-btn"
+                          onClick={() => {
+                            setCatalogPendingFilterKey("");
+                            setCatalogFilterSearch("");
+                          }}
+                        >
+                          {t(lang, "close")}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  {catalogActiveFilters.length > 0 ? (
+                    <button className="task-filter-clear" onClick={clearCatalogFilters}>{t(lang, "taskFilterClearAll")}</button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            {catalogMapSkuId ? (
+              <div className="catalog-map-preview">
+                <div className="catalog-map-head">
+                  <h4>{t(lang, "mapFocusSku")}: {catalogMapSkuId}</h4>
+                  <small>{catalogMapSkuLabel}</small>
+                  <button className="inline-btn" onClick={() => setCatalogMapSkuId(null)}>
+                    {t(lang, "mapFocusClear")}
+                  </button>
+                </div>
+                <div className="catalog-inline-map-wrap">
+                  <svg
+                    className="shopfloor"
+                    viewBox={`0 0 ${SHOPFLOOR_SIZE.width} ${SHOPFLOOR_SIZE.height}`}
+                    role="img"
+                    aria-label="Shopfloor map catalog focus"
+                  >
+                    <image href="/shopfloor-map.png" x="0" y="0" width={SHOPFLOOR_SIZE.width} height={SHOPFLOOR_SIZE.height} preserveAspectRatio="none" />
+                    <rect x="10" y="10" width="1516" height="1097" fill="transparent" stroke="#404040" strokeWidth="6" rx="8" />
+                    {locations.map((zone) => {
+                      const safePolygon = zone.mapPolygon.length > 0 ? zone.mapPolygon : [];
+                      const centerPoint = polygonCenter(safePolygon);
+                      const isHighlighted = catalogMapPulseZones.includes(zone.id);
+                      return (
+                        <g key={`catalog-map-zone-${zone.id}`} className="map-zone-group">
+                          <polygon
+                            points={polygonToPoints(safePolygon)}
+                            className="zone-overlay"
+                            style={{
+                              fill: isHighlighted ? `${zone.color}44` : `${zone.color}22`,
+                              stroke: zone.color
+                            }}
+                          />
+                          <text x={(safePolygon[0]?.x ?? 0) + 14} y={(safePolygon[0]?.y ?? 0) + 26} className="zone-label">
+                            {zone.name}
+                          </text>
+                          {isHighlighted ? (
+                            <g className="sku-pulse-marker">
+                              <circle cx={centerPoint.x} cy={centerPoint.y} r="10" className="sku-pulse-dot" />
+                              <circle cx={centerPoint.x} cy={centerPoint.y} r="12" className="sku-pulse-wave sku-pulse-wave--a" />
+                              <circle cx={centerPoint.x} cy={centerPoint.y} r="12" className="sku-pulse-wave sku-pulse-wave--b" />
+                            </g>
+                          ) : null}
+                        </g>
+                      );
+                    })}
+                  </svg>
+                </div>
+              </div>
+            ) : null}
+            <div className="catalog-grid">
+              {filteredCatalogEntries.map((product) => (
+                <article key={product.id} className="catalog-card">
+                  <header className="catalog-card-head">
+                    <h3>{product.title}</h3>
+                    <small>{product.brand}</small>
+                  </header>
+                  <div className="catalog-variant-list">
+                    {product.variants.map((variant) => (
+                      <section key={variant.id} className="catalog-variant-row">
+                        <img
+                          className="catalog-variant-image"
+                          src={variant.imageUrl}
+                          alt={`${product.title} ${variant.name}`}
+                        />
+                        <div className="catalog-variant-main">
+                          <strong>{variant.name}</strong>
+                          <div className="catalog-attribute-tags catalog-attribute-tags--compact">
+                            <span className="catalog-attr-tag">{t(lang, "catalogVariant")}: {variant.skuId}</span>
+                            <span className="catalog-attr-tag">{t(lang, "catalogBarcode")}: {variant.barcode}</span>
+                            <span className="catalog-attr-tag">{t(lang, "catalogSize")}: {variant.size}</span>
+                            <span className="catalog-attr-tag">{t(lang, "catalogSourceLabel")}: {variant.source}</span>
+                            {variant.kit ? (
+                              <span className="catalog-attr-tag">{t(lang, "catalogKit")}: {t(lang, `catalogValue_${variant.kit}`)}</span>
+                            ) : null}
+                            {variant.ageGroup ? (
+                              <span className="catalog-attr-tag">{t(lang, "catalogAgeGroup")}: {t(lang, `catalogValue_${variant.ageGroup}`)}</span>
+                            ) : null}
+                            {variant.gender ? (
+                              <span className="catalog-attr-tag">{t(lang, "catalogGender")}: {t(lang, `catalogValue_${variant.gender}`)}</span>
+                            ) : null}
+                            {variant.role ? (
+                              <span className="catalog-attr-tag">{t(lang, "catalogRole")}: {t(lang, `catalogValue_${variant.role}`)}</span>
+                            ) : null}
+                            {variant.quality ? (
+                              <span className="catalog-attr-tag">{t(lang, "catalogQuality")}: {t(lang, `catalogValue_${variant.quality}`)}</span>
+                            ) : null}
+                          </div>
+                          <div className="catalog-variant-actions">
+                            <button className="inline-btn" onClick={() => focusSkuOnMap(variant.skuId)}>
+                              {t(lang, "catalogLocateOnMap")}
+                            </button>
+                          </div>
+                          {variant.source === "RFID" ? (
+                            <div className="catalog-rfid-block">
+                              <small>{t(lang, "catalogRfidEpcs")}: {variant.rfidInStore?.totalEpcs ?? 0}</small>
+                              <div className="catalog-location-tags">
+                                {(variant.rfidInStore?.byLocation ?? []).length > 0 ? (
+                                  (variant.rfidInStore?.byLocation ?? []).map((entry: { zoneId: string; zoneName: string; qty: number }) => (
+                                    <span key={`${variant.id}-${entry.zoneId}`} className="catalog-location-tag">
+                                      {t(lang, "catalogInLocation", { zoneName: entry.zoneName, qty: entry.qty })}
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="catalog-location-tag">{t(lang, "catalogNoEpcs")}</span>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <small>{t(lang, "catalogNoRfidTag")}</small>
+                          )}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </article>
+        ) : mainContentView === "rules" ? (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "rulesHubTitle")}</h2>
+              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
+            </div>
+            <p className="drawer-subtitle">{t(lang, "rulesHubSubtitle")}</p>
+
+            <div className="control-group">
+              <h4>{t(lang, "rulesHubCreateEdit")}</h4>
+              <div className="panel-head-actions">
+                <button className="action-btn" onClick={openCreateRuleForm}>
+                  {t(lang, "rulesHubCreateNew")}
+                </button>
+              </div>
+              {rulesFormMode === "create" ? renderRuleEditor() : null}
+            </div>
+
+            <div className="control-group">
+              <h4>{t(lang, "rulesHubList")}</h4>
+              <div className="form-grid">
+                <label>
+                  {t(lang, "taskFilterDestinationLabel")}
+                  <select
+                    value={rulesLocationFilter}
+                    onChange={(e) => setRulesLocationFilter(e.target.value)}
+                  >
+                    <option value="all">{t(lang, "allZonesGlobal")}</option>
+                    {ruleLocationOptions.map((location) => (
+                      <option key={`rule-filter-location-${location.id}`} value={location.id}>
+                        {location.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <table className="inventory-table">
+                <thead>
+                  <tr>
+                    <th>{t(lang, "taskFilterDestinationLabel")}</th>
+                    <th>{t(lang, "rulesHubSelector")}</th>
+                    <th>{t(lang, "sku")}</th>
+                    <th>{t(lang, "source")}</th>
+                    <th>{t(lang, "min")}</th>
+                    <th>{t(lang, "max")}</th>
+                    <th>{t(lang, "rulesHubPriority")}</th>
+                    <th>{t(lang, "action")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRuleTemplates.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="empty">{t(lang, "taskFilterNoOptions")}</td>
+                    </tr>
+                  ) : (
+                    filteredRuleTemplates.map((template) => {
+                      const selectorLabel =
+                        template.selectorMode === "SKU"
+                          ? template.skuId ?? "-"
+                          : [
+                              template.attributes?.kit ? `${t(lang, "catalogKit")}: ${t(lang, `catalogValue_${template.attributes.kit}`)}` : null,
+                              template.attributes?.ageGroup ? `${t(lang, "catalogAgeGroup")}: ${t(lang, `catalogValue_${template.attributes.ageGroup}`)}` : null,
+                              template.attributes?.gender ? `${t(lang, "catalogGender")}: ${t(lang, `catalogValue_${template.attributes.gender}`)}` : null,
+                              template.attributes?.role ? `${t(lang, "catalogRole")}: ${t(lang, `catalogValue_${template.attributes.role}`)}` : null,
+                              template.attributes?.quality ? `${t(lang, "catalogQuality")}: ${t(lang, `catalogValue_${template.attributes.quality}`)}` : null
+                            ]
+                              .filter((value): value is string => Boolean(value))
+                              .join(" · ") || "-";
+                      return (
+                        <Fragment key={template.id}>
+                          <tr>
+                            <td>{template.scope === "GENERIC" ? "-" : (template.zoneId ? (locationNameById.get(template.zoneId) ?? template.zoneId) : "-")}</td>
+                            <td>{template.selectorMode === "SKU" ? t(lang, "rulesHubSelectorSku") : t(lang, "rulesHubSelectorAttributes")}</td>
+                            <td>{template.selectorMode === "SKU" ? `${template.skuId ?? "-"} · ${skuNameById.get(template.skuId ?? "") ?? ""}` : selectorLabel}</td>
+                            <td>{template.source}</td>
+                            <td>{template.minQty}</td>
+                            <td>{template.maxQty}</td>
+                            <td>{template.priority}</td>
+                            <td>
+                              <button className="inline-btn" onClick={() => editRuleTemplate(template)}>{t(lang, "edit")}</button>
+                              <button className="inline-btn" onClick={() => removeRuleTemplate(template.id)}>{t(lang, "delete")}</button>
+                            </td>
+                          </tr>
+                          {rulesFormMode === "edit" && ruleCenterForm.id === template.id ? (
+                            <tr>
+                              <td colSpan={8}>
+                                <div className="control-group">
+                                  {renderRuleEditor()}
+                                </div>
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        ) : mainContentView === "tasks" ? (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "tasks")}</h2>
+              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
+            </div>
+            <div className="control-group">
+              <h4>Task Hub</h4>
+              <div className="task-filter-bar">
+                <div className="task-filter-chip-list">
+                  {taskHubActiveFilters.map((filter) => (
+                    <div key={`task-filter-chip-${filter.key}`} className="task-filter-anchor">
+                      <button
+                        type="button"
+                        className="task-filter-chip"
+                        onClick={() => {
+                          setTaskHubPendingFilterKey(filter.key);
+                          setTaskHubFilterSearch("");
+                        }}
+                        title="Edit filter"
+                      >
+                        {filter.label}: {filter.valueLabel}
+                        <span
+                          className="task-filter-chip-close-inline"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            removeTaskHubFilter(filter.key);
+                          }}
+                          aria-hidden="true"
+                          title="Remove filter"
+                        >
+                          ×
+                        </span>
+                      </button>
+                      {taskHubPendingFilterKey === filter.key ? (
+                        <div className="task-filter-picker">
+                          <input
+                            className="task-filter-search"
+                            placeholder={t(lang, "taskFilterSearchPlaceholder")}
+                            value={taskHubFilterSearch}
+                            onChange={(e) => setTaskHubFilterSearch(e.target.value)}
+                          />
+                          <div className="task-filter-option-list">
+                            {taskHubPendingOptions.map((option) => (
+                              <label key={`task-filter-option-${taskHubPendingFilterKey}-${option.id}`} className="task-filter-option">
+                                <input
+                                  type="checkbox"
+                                  checked={isTaskHubPendingOptionSelected(option.id)}
+                                  onChange={() => toggleTaskHubPendingOption(option.id)}
+                                />
+                                <span>{option.label}</span>
+                              </label>
+                            ))}
+                            {taskHubPendingOptions.length === 0 ? (
+                              <p className="empty">{t(lang, "taskFilterNoOptions")}</p>
+                            ) : null}
+                          </div>
+                          <button className="task-filter-clear" onClick={() => removeTaskHubFilter(taskHubPendingFilterKey as TaskHubFilterKey)}>
+                            {t(lang, "taskFilterClear")}
+                          </button>
+                          <button
+                            className="inline-btn"
+                            onClick={() => {
+                              setTaskHubPendingFilterKey("");
+                              setTaskHubFilterSearch("");
+                            }}
+                          >
+                            {t(lang, "close")}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                  <div className="task-filter-anchor">
+                    {taskHubAddableFilterKeys.length > 0 ? (
+                      <select
+                        className="task-filter-add"
+                        value={taskHubPendingFilterKey}
+                        onChange={(e) => {
+                          setTaskHubPendingFilterKey(e.target.value as TaskHubFilterKey | "");
+                          setTaskHubFilterSearch("");
+                        }}
+                      >
+                        <option value="">{t(lang, "taskFilterAdd")}</option>
+                        {taskHubAddableFilterKeys.includes("TYPE") ? <option value="TYPE">{t(lang, "taskFilterTypeLabel")}</option> : null}
+                        {taskHubAddableFilterKeys.includes("DESTINATION") ? <option value="DESTINATION">{t(lang, "taskFilterDestinationLabel")}</option> : null}
+                        {taskHubAddableFilterKeys.includes("STATUS") ? <option value="STATUS">{t(lang, "taskFilterStatusLabel")}</option> : null}
+                      </select>
+                    ) : null}
+                    {taskHubPendingFilterKey && taskHubAddableFilterKeys.includes(taskHubPendingFilterKey as TaskHubFilterKey) ? (
+                      <div className="task-filter-picker">
+                        <input
+                          className="task-filter-search"
+                          placeholder={t(lang, "taskFilterSearchPlaceholder")}
+                          value={taskHubFilterSearch}
+                          onChange={(e) => setTaskHubFilterSearch(e.target.value)}
+                        />
+                        <div className="task-filter-option-list">
+                          {taskHubPendingOptions.map((option) => (
+                            <label key={`task-filter-option-${taskHubPendingFilterKey}-${option.id}`} className="task-filter-option">
+                              <input
+                                type="checkbox"
+                                checked={isTaskHubPendingOptionSelected(option.id)}
+                                onChange={() => toggleTaskHubPendingOption(option.id)}
+                              />
+                              <span>{option.label}</span>
+                            </label>
+                          ))}
+                          {taskHubPendingOptions.length === 0 ? (
+                            <p className="empty">{t(lang, "taskFilterNoOptions")}</p>
+                          ) : null}
+                        </div>
+                        <button className="task-filter-clear" onClick={() => removeTaskHubFilter(taskHubPendingFilterKey as TaskHubFilterKey)}>
+                          {t(lang, "taskFilterClear")}
+                        </button>
+                        <button
+                          className="inline-btn"
+                          onClick={() => {
+                            setTaskHubPendingFilterKey("");
+                            setTaskHubFilterSearch("");
+                          }}
+                        >
+                          {t(lang, "close")}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  {taskHubActiveFilters.length > 0 ? (
+                    <button className="task-filter-clear" onClick={clearTaskHubFilters}>{t(lang, "taskFilterClearAll")}</button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="inventory-available-list">
+                {filteredUnifiedTaskRows.length === 0 ? (
+                  <p className="empty">No hay tasks para los filtros seleccionados.</p>
+                ) : (
+                  filteredUnifiedTaskRows.map((row) => (
+                    <div key={`hub-task-${row.type}-${row.id}`} className="inventory-available-item">
+                      <div>
+                        <strong>{row.id} · {row.skuId}</strong>
+                        <small>
+                          type={row.type} · location={row.locationName} · source={row.sourceLabel} · qty={row.qtyLabel}
+                        </small>
+                        <small>
+                          assigned={row.assignedStaffId ?? t(lang, "pendingAssignment")} · status={row.status} · {row.createdAt}
+                        </small>
+                      </div>
+                      {row.type === "RECEIVING" && row.status === "IN_TRANSIT" ? (
+                        <div className="staff-item-actions">
+                          <button
+                            className="action-btn"
+                            disabled={!row.assignedStaffId}
+                            onClick={() => confirmReceivingOrder(row.id)}
+                          >
+                            Confirmar recepción
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            {receivingStatusMessage ? <p className="drawer-subtitle">{receivingStatusMessage}</p> : null}
+          </article>
+        ) : (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "analytics")}</h2>
+              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
+            </div>
+            <div className="analytics-kpi-grid">
+              <article className="analytics-kpi-card">
+                <small>{t(lang, "analyticsTotalTasks")}</small>
+                <strong>{analyticsData.totalTasks}</strong>
+              </article>
+              <article className="analytics-kpi-card">
+                <small>{t(lang, "analyticsBacklog")}</small>
+                <strong>{analyticsData.backlog}</strong>
+              </article>
+              <article className="analytics-kpi-card">
+                <small>{t(lang, "analyticsAvgConfirmTime")}</small>
+                <strong>{analyticsData.avgConfirmSeconds === null ? "-" : toDurationLabel(analyticsData.avgConfirmSeconds)}</strong>
+              </article>
+              <article className="analytics-kpi-card">
+                <small>{t(lang, "analyticsPartialConfirmations")}</small>
+                <strong>{analyticsData.partialConfirmedCount}</strong>
+              </article>
+              <article className="analytics-kpi-card">
+                <small>{t(lang, "staffQueuePending")}</small>
+                <strong>{analyticsData.queueUnassigned}</strong>
+              </article>
+              <article className="analytics-kpi-card">
+                <small>{t(lang, "staffTasksBlocked")}</small>
+                <strong>{analyticsData.openBlocked}</strong>
+              </article>
+            </div>
+            <div className="analytics-grid">
+              <section className="analytics-panel">
+                <h4>{t(lang, "analyticsTasksByStatus")}</h4>
+                {(["CREATED", "ASSIGNED", "IN_PROGRESS", "CONFIRMED", "REJECTED"] as const).map((status) => {
+                  const total = Math.max(1, analyticsData.totalTasks);
+                  const value = analyticsData.statusCounts[status];
+                  const pct = Math.round((value / total) * 100);
+                  const statusLabel =
+                    status === "CREATED"
+                      ? t(lang, "taskStatusCreated")
+                      : status === "ASSIGNED"
+                        ? t(lang, "taskStatusAssigned")
+                        : status === "IN_PROGRESS"
+                          ? t(lang, "taskStatusInProgress")
+                          : status === "CONFIRMED"
+                            ? t(lang, "taskStatusConfirmed")
+                            : t(lang, "taskStatusRejected");
+                  return (
+                    <div key={status} className="analytics-row">
+                      <span>{statusLabel}</span>
+                      <div className="analytics-bar-track">
+                        <div className="analytics-bar-fill" style={{ width: `${pct}%` }} />
+                      </div>
+                      <strong>{value}</strong>
+                    </div>
+                  );
+                })}
+              </section>
+
+              <section className="analytics-panel">
+                <h4>{t(lang, "analyticsTopReplenishedSkus")}</h4>
+                {(analyticsData.skuStats.length === 0 ? [] : analyticsData.skuStats.slice(0, 8)).map((sku) => {
+                  const maxConfirmed = Math.max(1, ...analyticsData.skuStats.map((entry) => entry.totalConfirmed));
+                  const pct = Math.round((sku.totalConfirmed / maxConfirmed) * 100);
+                  return (
+                    <div key={sku.skuId} className="analytics-row">
+                      <span>{sku.skuId}</span>
+                      <div className="analytics-bar-track">
+                        <div className="analytics-bar-fill analytics-bar-fill--alt" style={{ width: `${pct}%` }} />
+                      </div>
+                      <strong>{sku.totalConfirmed}</strong>
+                    </div>
+                  );
+                })}
+                {analyticsData.skuStats.length === 0 ? <p className="empty">{t(lang, "noAnalyticsData")}</p> : null}
+              </section>
+
+              <section className="analytics-panel analytics-panel--wide">
+                <h4>{t(lang, "analyticsStaffPerformance")}</h4>
+                <div className="analytics-staff-list">
+                  {analyticsData.staffStats.map((entry) => (
+                    <div key={entry.memberId} className="analytics-staff-item">
+                      <strong>{entry.memberName}</strong>
+                      <small>
+                        {t(lang, "staffTasksCompleted")}: {entry.completed} · {t(lang, "staffTasksConfirmed")}: {entry.confirmed} ·
+                        {" "}{t(lang, "analyticsConfirmedUnits")}: {entry.confirmedQty}
+                      </small>
+                      <small>
+                        {t(lang, "staffAvgCycleTime")}: {entry.avgCycleSeconds === null ? "-" : toDurationLabel(entry.avgCycleSeconds)} ·
+                        {" "}{t(lang, "staffAvgAssignToConfirm")}: {entry.avgConfirmSeconds === null ? "-" : toDurationLabel(entry.avgConfirmSeconds)}
+                      </small>
+                    </div>
+                  ))}
+                  {analyticsData.staffStats.length === 0 ? <p className="empty">{t(lang, "noAnalyticsData")}</p> : null}
+                </div>
+              </section>
+
+              <section className="analytics-panel analytics-panel--wide">
+                <h4>{t(lang, "analyticsReplenishmentHeatmap")}</h4>
+                <div className="analytics-heatmap-wrap">
+                  <svg
+                    className="analytics-heatmap"
+                    viewBox={`0 0 ${SHOPFLOOR_SIZE.width} ${SHOPFLOOR_SIZE.height}`}
+                    role="img"
+                    aria-label={t(lang, "analyticsReplenishmentHeatmap")}
+                  >
+                    <image
+                      href="/shopfloor-map.png"
+                      x="0"
+                      y="0"
+                      width={SHOPFLOOR_SIZE.width}
+                      height={SHOPFLOOR_SIZE.height}
+                      preserveAspectRatio="none"
+                    />
+                    {locations.map((zone) => {
+                      const movement = analyticsData.zoneMovement.find((entry) => entry.zoneId === zone.id);
+                      const maxQty = Math.max(1, ...analyticsData.zoneMovement.map((entry) => entry.confirmedQty));
+                      const intensity = Math.max(0, Math.min(1, (movement?.confirmedQty ?? 0) / maxQty));
+                      const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
+                      const paletteStart = [34, 197, 94]; // green
+                      const paletteMid = [245, 158, 11]; // amber
+                      const paletteEnd = [239, 68, 68]; // red
+                      const localT = intensity <= 0.5 ? intensity / 0.5 : (intensity - 0.5) / 0.5;
+                      const from = intensity <= 0.5 ? paletteStart : paletteMid;
+                      const to = intensity <= 0.5 ? paletteMid : paletteEnd;
+                      const r = Math.round(lerp(from[0], to[0], localT));
+                      const g = Math.round(lerp(from[1], to[1], localT));
+                      const b = Math.round(lerp(from[2], to[2], localT));
+                      const alpha = 0.2 + intensity * 0.55;
+                      const stroke = `rgb(${r}, ${g}, ${b})`;
+                      return (
+                        <g key={`heat-${zone.id}`}>
+                          <polygon
+                            points={polygonToPoints(zone.mapPolygon)}
+                            className="analytics-heat-zone"
+                            style={{ fill: `rgba(${r}, ${g}, ${b}, ${alpha})`, stroke }}
+                          />
+                          <text
+                            x={zone.mapPolygon[0].x + 12}
+                            y={zone.mapPolygon[0].y + 24}
+                            className="analytics-heat-label"
+                          >
+                            {zone.name}
+                          </text>
+                          <text
+                            x={zone.mapPolygon[0].x + 12}
+                            y={zone.mapPolygon[0].y + 42}
+                            className="analytics-heat-sub"
+                          >
+                            {t(lang, "analyticsConfirmedUnits")}: {movement?.confirmedQty ?? 0}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                  <div className="analytics-heat-legend">
+                    <span>{t(lang, "analyticsHeatLow")}</span>
+                    <div className="analytics-heat-ramp" />
+                    <span>{t(lang, "analyticsHeatHigh")}</span>
+                  </div>
+                  {analyticsData.topZoneMovement ? (
+                    <p className="analytics-heat-top">
+                      {t(lang, "analyticsTopMovingLocation")}:
+                      {" "}
+                      <strong>
+                        {locations.find((zone) => zone.id === analyticsData.topZoneMovement?.zoneId)?.name ?? analyticsData.topZoneMovement.zoneId}
+                      </strong>
+                      {" "}
+                      ({analyticsData.topZoneMovement.confirmedQty} {t(lang, "unitsSuffix")})
+                    </p>
+                  ) : null}
+                  <div className="analytics-staff-list">
+                    {analyticsData.zoneMovement.map((entry) => (
+                      <div key={`movement-${entry.zoneId}`} className="analytics-staff-item">
+                        <strong>{locations.find((zone) => zone.id === entry.zoneId)?.name ?? entry.zoneId}</strong>
+                        <small>
+                          {t(lang, "analyticsConfirmedUnits")}: {entry.confirmedQty} · {t(lang, "tasks")}: {entry.confirmedTasks}
+                        </small>
+                        <small>
+                          {t(lang, "analyticsOpenDemandUnits")}: {entry.openDemandQty}
+                        </small>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            </div>
+          </article>
+        )}
+      </section>
+
+      <section className="panel">
+        <article>
+          <h2>{t(lang, "storeFlowTimeline")}</h2>
+          <div className="timeline timeline--full">
+            {flow.length === 0 ? (
+              <p className="empty">{t(lang, "noActionsYet")}</p>
+            ) : (
+              flow.map((event) => (
+                <div className="timeline-item" key={event.id}>
+                  <strong>{event.title}</strong>
+                  <small>{event.at}</small>
+                  <p>{event.details}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </article>
+      </section>
+
+      {mainContentView === "map" ? (
+      <aside className={showZoneDrawer ? "side-drawer side-drawer--open side-drawer--zone" : "side-drawer side-drawer--zone"}>
+        <div className="side-drawer-head">
+          <h3>{t(lang, "zonePanel")}</h3>
+          <button className="inline-btn" onClick={closeZoneDrawer}>{t(lang, "close")}</button>
+        </div>
+        <p className="drawer-subtitle">{t(lang, "zoneLabel")}: {selectedZone === "all" ? t(lang, "allZonesGlobal") : selectedZoneSummary?.zoneName ?? selectedZone}</p>
+        <div className="drawer-nav">
+          <button
+            className={zoneDrawerSection === "inventory" ? "drawer-pill drawer-pill--active" : "drawer-pill"}
+            onClick={() => setZoneDrawerSection("inventory")}
+          >
+            {t(lang, "inventory")}
+          </button>
+          <button
+            className={zoneDrawerSection === "rules" ? "drawer-pill drawer-pill--active" : "drawer-pill"}
+            onClick={() => setZoneDrawerSection("rules")}
+          >
+            {t(lang, "rules")}
+          </button>
+          <button
+            className={zoneDrawerSection === "tasks" ? "drawer-pill drawer-pill--active task-toggle" : "drawer-pill task-toggle"}
+            onClick={() => setZoneDrawerSection("tasks")}
+          >
+            {t(lang, "tasks")}
+            {(openTasks.filter((task) => selectedZone === "all" || task.zoneId === selectedZone).length +
+              pendingReceivingOrders.filter((order) => selectedZone === "all" || order.destinationZoneId === selectedZone).length) > 0 ? (
+              <span className="task-badge">
+                {openTasks.filter((task) => selectedZone === "all" || task.zoneId === selectedZone).length +
+                  pendingReceivingOrders.filter((order) => selectedZone === "all" || order.destinationZoneId === selectedZone).length}
+              </span>
+            ) : null}
+          </button>
+          <button
+            className={zoneDrawerSection === "settings" ? "drawer-pill drawer-pill--active" : "drawer-pill"}
+            onClick={() => setZoneDrawerSection("settings")}
+          >
+            Settings
+          </button>
+        </div>
+
+        {zoneDrawerSection === "inventory" ? (
+          <details className="drawer-accordion" open>
+            <summary>Inventory Available In Zone</summary>
+            <div className="inventory-available-list">
+              {visibleInventoryRows.length === 0 ? (
+                <p className="empty">{t(lang, "noSkuRows")}</p>
+              ) : (
+                visibleInventoryRows.map((item) => (
+                  <div key={`${item.skuId}-${item.source}`} className="inventory-available-item">
+                    <div>
+                      <strong>{item.skuId}</strong>
+                      <small>{item.source}</small>
+                    </div>
+                    <div className="inventory-available-metrics">
+                      <strong>{item.qty} {t(lang, "unitsSuffix")}</strong>
+                      <small>{item.confidence !== undefined ? `${Math.round(item.confidence * 100)}% conf.` : t(lang, "deterministic")}</small>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </details>
+        ) : null}
+
+        {zoneDrawerSection === "settings" ? (
+          <>
+            <details className="drawer-accordion" open>
+              <summary>Location Settings</summary>
+              {selectedZone === "all" && !createMode ? (
+                <div className="control-group">
+                  <p className="empty">Select one zone to edit, or create a new one.</p>
+                  <button className="action-btn" onClick={startCreateZone}>Create New Zone</button>
+                </div>
+              ) : (
+                <div className="control-group">
+                  {createMode ? (
+                    <div className="form-grid">
+                      <label>
+                        Location Type
+                        <select
+                          value={newZoneForm.locationType}
+                          onChange={(e) => {
+                            const locationType = e.target.value as "sales" | "warehouse" | "external";
+                            setNewZoneForm((prev) => ({
+                              ...prev,
+                              locationType
+                            }));
+                            if (locationType === "external") {
+                              setMapEditMode(false);
+                              setNewZonePolygon([]);
+                            } else {
+                              setMapEditMode(true);
+                            }
+                          }}
+                        >
+                          <option value="sales">sales</option>
+                          <option value="warehouse">warehouse</option>
+                          <option value="external">external</option>
+                        </select>
+                      </label>
+                      {newZoneForm.locationType !== "external" ? (
+                        <label>
+                          Zone ID
+                          <input
+                            type="text"
+                            value={newZoneForm.zoneId}
+                            onChange={(e) => setNewZoneForm((prev) => ({ ...prev, zoneId: e.target.value }))}
+                          />
+                        </label>
+                      ) : null}
+                      <label>
+                        Name
+                        <input
+                          type="text"
+                          value={newZoneForm.name}
+                          onChange={(e) => setNewZoneForm((prev) => ({ ...prev, name: e.target.value }))}
+                        />
+                      </label>
+                      {newZoneForm.locationType !== "external" ? (
+                        <>
+                          <label>
+                            Color
+                            <input
+                              type="color"
+                              value={newZoneForm.color}
+                              onChange={(e) => setNewZoneForm((prev) => ({ ...prev, color: e.target.value }))}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {!createMode ? (
+                  <div className="form-grid">
+                    <label>
+                      Name
+                      <input
+                        type="text"
+                        value={zoneEditForm.name}
+                        onChange={(e) => setZoneEditForm((prev) => ({ ...prev, name: e.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Color
+                      <input
+                        type="color"
+                        value={zoneEditForm.color}
+                        onChange={(e) => {
+                          const color = e.target.value;
+                          setZoneEditForm((prev) => ({ ...prev, color }));
+                          setPreviewZoneColor(color);
+                        }}
+                      />
+                    </label>
+                    <label>
+                      Location Type
+                      <select
+                        value={zoneEditForm.isSalesLocation ? "sales" : "warehouse"}
+                        onChange={(e) =>
+                          setZoneEditForm((prev) => ({
+                            ...prev,
+                            isSalesLocation: e.target.value === "sales"
+                          }))
+                        }
+                      >
+                        <option value="sales">sales</option>
+                        <option value="warehouse">warehouse</option>
+                        <option value="external" disabled>external</option>
+                      </select>
+                    </label>
+                  </div>
+                  ) : null}
+                  {!createMode || newZoneForm.locationType !== "external" ? (
+                    <>
+                      <h4>Polygon Editor</h4>
+                      <div className="header-action-row">
+                        <button
+                          className={mapEditMode ? "action-btn" : "inline-btn"}
+                          onClick={() => setMapEditMode((prev) => !prev)}
+                        >
+                          {mapEditMode ? "Stop editing" : "Edit polygon on map"}
+                        </button>
+                        <button
+                          className="inline-btn"
+                          onClick={clearCurrentPolygonPoints}
+                        >
+                          Clear points
+                        </button>
+                        {createMode ? (
+                          <>
+                            <button className="action-btn" disabled={newZonePolygon.length < 3} onClick={saveNewZone}>Create zone</button>
+                            <button
+                              className="inline-btn"
+                              onClick={() => {
+                                setCreateMode(false);
+                                setMapEditMode(false);
+                                setNewZonePolygon([]);
+                              }}
+                            >
+                              Cancel create
+                            </button>
+                          </>
+                        ) : (
+                          <button className="action-btn" disabled={draftPolygon.length < 3} onClick={savePolygon}>Save polygon</button>
+                        )}
+                      </div>
+                      <pre className="coords-preview">{JSON.stringify(createMode ? newZonePolygon : draftPolygon, null, 2)}</pre>
+                    </>
+                  ) : (
+                    <div className="header-action-row">
+                      <button className="action-btn" onClick={saveNewZone}>Create external location</button>
+                      <button
+                        className="inline-btn"
+                        onClick={() => {
+                          setCreateMode(false);
+                          setMapEditMode(false);
+                          setNewZonePolygon([]);
+                        }}
+                      >
+                        Cancel create
+                      </button>
+                    </div>
+                  )}
+
+                  {!createMode ? (
+                    <h4>
+                      {selectedLocation?.isSalesLocation
+                        ? "Replenishment Source Locations (sorted)"
+                        : "External Source Locations (sorted)"}
+                    </h4>
+                  ) : null}
+                  {!createMode ? (
+                  <div className="inventory-available-list">
+                    {sourceEditor.map((row, index) => (
+                      <div
+                        key={`${row.sourceZoneId}-${index}`}
+                        className={
+                          "inventory-available-item source-sort-item" +
+                          (dragSourceIndex === index ? " source-sort-item--dragging" : "")
+                        }
+                        draggable
+                        onDragStart={() => onSourceDragStart(index)}
+                        onDragOver={onSourceDragOver}
+                        onDrop={() => onSourceDrop(index)}
+                        onDragEnd={onSourceDragEnd}
+                      >
+                        <button
+                          type="button"
+                          className="source-drag-handle"
+                          aria-label="Drag source location to reorder"
+                          title="Drag to reorder"
+                        >
+                          ⋮⋮
+                        </button>
+                        <label>
+                          <select
+                            value={row.sourceZoneId}
+                            aria-label="Source location"
+                            onChange={(e) =>
+                              setSourceEditor((prev) =>
+                                prev.map((entry, i) => (i === index ? { ...entry, sourceZoneId: e.target.value } : entry))
+                              )
+                            }
+                          >
+                            {sourceEditorOptions.map((option) => (
+                                <option key={option.id} value={option.id}>
+                                  {option.name}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <div className="source-sort-order">#{row.sortOrder}</div>
+                        <button
+                          className="inline-btn"
+                          onClick={() => setSourceEditor((prev) => prev.filter((_, i) => i !== index))}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  ) : null}
+                  {!createMode ? (
+                    <div className="header-action-row">
+                      <button className="inline-btn" onClick={addSourceRow} disabled={sourceEditorOptions.length === 0}>
+                        Add Source
+                      </button>
+                      <button className="action-btn" onClick={saveLocationSettings}>Save Location</button>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </details>
+          </>
+        ) : null}
+
+        {zoneDrawerSection === "rules" ? (
+          <>
+            <details className="drawer-accordion" open>
+              <summary>{t(lang, "defineMinMaxRule")}</summary>
+              <div className="control-group">
+                <div className="form-grid">
+                  <label>
+                    {t(lang, "sku")}
+                    <select value={ruleForm.skuId} onChange={(e) => setRuleForm((v) => ({ ...v, skuId: e.target.value }))}>
+                      {selectedZoneSkuOptions.length === 0 ? (
+                        <option value={ruleForm.skuId}>{ruleForm.skuId}</option>
+                      ) : (
+                        selectedZoneSkuOptions.map((skuId) => <option key={skuId} value={skuId}>{skuId}</option>)
+                      )}
+                    </select>
+                  </label>
+                  <label>
+                    {t(lang, "source")}
+                    <select value={ruleForm.source} onChange={(e) => setRuleForm((v) => ({ ...v, source: e.target.value as InventorySource }))}>
+                      <option value="NON_RFID">NON_RFID</option>
+                      <option value="RFID">RFID</option>
+                    </select>
+                  </label>
+                  <label>
+                    {t(lang, "min")}
+                    <input type="number" min={0} value={ruleForm.minQty} onChange={(e) => setRuleForm((v) => ({ ...v, minQty: Number(e.target.value) }))} />
+                  </label>
+                  <label>
+                    {t(lang, "max")}
+                    <input type="number" min={0} value={ruleForm.maxQty} onChange={(e) => setRuleForm((v) => ({ ...v, maxQty: Number(e.target.value) }))} />
+                  </label>
+                </div>
+                <button className="action-btn" disabled={selectedZone === "all"} onClick={upsertRule}>{t(lang, "applyRule")}</button>
+              </div>
+            </details>
+            <details className="drawer-accordion" open>
+              <summary>{t(lang, "rulesInZone")}</summary>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>{t(lang, "sku")}</th><th>{t(lang, "source")}</th><th>{t(lang, "min")}</th><th>{t(lang, "max")}</th><th>{t(lang, "action")}</th></tr>
+                  </thead>
+                  <tbody>
+                    {zoneRules.map((rule) => (
+                      <tr key={rule.id}>
+                        <td>{rule.skuId}</td>
+                        <td>{rule.source}</td>
+                        <td>{rule.minQty}</td>
+                        <td>{rule.maxQty}</td>
+                        <td>
+                          <button className="inline-btn" onClick={() => deleteRule(rule.id)}>{t(lang, "delete")}</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </>
+        ) : null}
+
+        {zoneDrawerSection === "tasks" ? (
+          <details className="drawer-accordion" open>
+            <summary>
+              {selectedLocation && !selectedLocation.isSalesLocation
+                ? "Receiving tasks in location"
+                : t(lang, "replenishmentTasksInZone")}
+            </summary>
+            <div className="task-list">
+              {(selectedLocation && !selectedLocation.isSalesLocation
+                ? pendingReceivingOrders.filter((order) => selectedZone === "all" || order.destinationZoneId === selectedZone)
+                : openTasks.filter((task) => selectedZone === "all" || task.zoneId === selectedZone)
+              ).length === 0 ? (
+                <p className="empty">
+                  {selectedLocation && !selectedLocation.isSalesLocation
+                    ? "No receiving tasks in location."
+                    : (selectedZone === "all" ? t(lang, "noOpenTasks") : t(lang, "noOpenTasksInZone"))}
+                </p>
+              ) : (
+                (selectedLocation && !selectedLocation.isSalesLocation
+                  ? pendingReceivingOrders.filter((order) => selectedZone === "all" || order.destinationZoneId === selectedZone)
+                  : openTasks.filter((task) => selectedZone === "all" || task.zoneId === selectedZone)
+                ).map((task) =>
+                  "destinationZoneId" in task ? (
+                    <div key={task.id} className="task-card">
+                      <div className="task-card-top">
+                        <div className="task-main">
+                          <strong>{task.skuId}</strong>
+                          <p>{locationNameById.get(task.destinationZoneId) ?? task.destinationZoneId}</p>
+                          <p>{t(lang, "assigned")}: {task.assignedStaffId ?? t(lang, "pendingAssignment")}</p>
+                          <p>{t(lang, "source")}: {locationNameById.get(task.sourceLocationId) ?? task.sourceLocationId}</p>
+                        </div>
+                        <div className="task-controls">
+                          <p>in_transit: {task.confirmedQty}/{task.requestedQty}</p>
+                          <button
+                            className="inline-btn"
+                            disabled={task.status !== "IN_TRANSIT" || !task.assignedStaffId}
+                            onClick={() => confirmReceivingOrder(task.id)}
+                          >
+                            {t(lang, "confirm")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={task.id} className="task-card">
+                      <div className="task-card-top">
+                        <div className="task-main">
+                          <strong>{task.skuId}</strong>
+                          <p>{task.zoneId}</p>
+                          <p>{t(lang, "assigned")}: {task.assignedStaffId ?? t(lang, "pendingAssignment")}</p>
+                          <p>{t(lang, "source")}: {task.sourceZoneId ?? "-"}</p>
+                        </div>
+                        <div className="task-controls">
+                          <p>{t(lang, "deficit")}: {task.deficitQty}</p>
+                          <label>
+                            {t(lang, "source")}
+                            <select
+                              value={taskSourceById[task.id] ?? task.sourceZoneId ?? ""}
+                              onChange={(e) =>
+                                setTaskSourceById((prev) => ({ ...prev, [task.id]: e.target.value }))
+                              }
+                            >
+                              {(task.sourceCandidates ?? []).map((source: { sourceZoneId: string; sortOrder: number; availableQty: number }) => (
+                                <option key={source.sourceZoneId} value={source.sourceZoneId}>
+                                  {t(lang, "taskSourceOption", {
+                                    sourceZoneId: source.sourceZoneId,
+                                    sortOrder: source.sortOrder,
+                                    availableQty: source.availableQty
+                                  })}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          {task.status === "ASSIGNED" ? (
+                            <button
+                              className="inline-btn"
+                              onClick={() =>
+                                startTask(
+                                  task.id,
+                                  task.assignedStaffId ?? undefined
+                                )
+                              }
+                            >
+                              {t(lang, "start")}
+                            </button>
+                          ) : null}
+                          <button
+                            className="inline-btn"
+                            disabled={
+                              task.status !== "IN_PROGRESS" ||
+                              ((task.sourceCandidates ?? []).find(
+                                (source) =>
+                                  source.sourceZoneId === (taskSourceById[task.id] ?? task.sourceZoneId ?? "")
+                              )?.availableQty ?? 0) <= 0
+                            }
+                            onClick={() =>
+                              confirmTask(
+                                task.id,
+                                task.deficitQty,
+                                taskSourceById[task.id] ?? task.sourceZoneId,
+                                task.assignedStaffId ?? undefined
+                              )
+                            }
+                          >
+                            {t(lang, "confirm")}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="task-audit-mini">
+                        {(taskAudit.filter((entry) => entry.taskId === task.id).slice(0, 3)).map((entry) => (
+                          <small key={entry.id}>
+                            {entry.timestamp} · {entry.action} · {entry.actorId ?? t(lang, "system")}
+                          </small>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                )
+              )}
+            </div>
+          </details>
+        ) : null}
+
+      </aside>
+      ) : null}
+
+      <aside className={showRfidDrawer ? "side-drawer side-drawer--open side-drawer--rfid" : "side-drawer side-drawer--rfid"}>
+        <div className="side-drawer-head">
+          <h3>RFID Pulse & Data</h3>
+          <button className="inline-btn" onClick={() => setShowRfidDrawer(false)}>{t(lang, "close")}</button>
+        </div>
+        <p className="drawer-subtitle">{t(lang, "rfidDrawerSubtitle")}</p>
+        <div className="control-group">
+          <h4>{t(lang, "autoSweep")}</h4>
+          <div className="auto-sweep-pill auto-sweep-pill--subtle">
+            <small>{t(lang, "autoSweepEvery")}</small>
+            <strong>{t(lang, "autoSweepNextIn", { seconds: autoSweepRemainingSec })}</strong>
+            <button className="auto-sweep-toggle-btn" onClick={() => setAutoSweepEnabled((prev) => !prev)}>
+              {autoSweepEnabled ? t(lang, "autoSweepPause") : t(lang, "autoSweepResume")}
+            </button>
+          </div>
+        </div>
+        <div className="control-group">
+          <h4>{t(lang, "rfidManualPulseSection")}</h4>
+          <p className="drawer-subtitle">{t(lang, "rfidManualPulseHint")}</p>
+          <div className="form-grid">
+            <label>
+              EPC
+              <select value={rfidForm.epc} onChange={(e) => setRfidForm((prev) => ({ ...prev, epc: e.target.value }))}>
+                {rfidCatalog.epcMappings.map((entry) => (
+                  <option key={entry.epc} value={entry.epc}>{entry.epc} ({entry.skuId})</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Antenna
+              <select value={rfidForm.antennaId} onChange={(e) => setRfidForm((prev) => ({ ...prev, antennaId: e.target.value }))}>
+                {rfidCatalog.antennas.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.id} ({entry.zoneId}) [{Math.round(entry.x)},{Math.round(entry.y)}]
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              RSSI
+              <input
+                type="number"
+                step="0.1"
+                value={rfidForm.rssi}
+                onChange={(e) => setRfidForm((prev) => ({ ...prev, rssi: Number(e.target.value) }))}
+              />
+            </label>
+          </div>
+          <button className="action-btn" onClick={injectRFIDPulse}>{t(lang, "injectRfidPulse")}</button>
+        </div>
+        <div className="control-group">
+          <h4>{t(lang, "rfidZoneSweepSection")}</h4>
+          <p className="drawer-subtitle">{t(lang, "rfidZoneSweepHint")}</p>
+          <div className="form-grid">
+            <label>
+              {t(lang, "zoneLabel")}
+              <select value={rfidSweepZoneId} onChange={(e) => setRfidSweepZoneId(e.target.value as InventoryZoneId)}>
+                {locations.map((zone) => (
+                  <option key={`rfid-sweep-${zone.id}`} value={zone.id}>
+                    {zone.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <button className="action-btn action-btn--ghost" onClick={forceRfidZoneSweep}>{t(lang, "forceZoneSweep")}</button>
+        </div>
+        <details className="drawer-accordion" open>
+          <summary>{t(lang, "rfidCatalogPreview")}</summary>
+          <pre className="coords-preview">{JSON.stringify(rfidCatalog, null, 2)}</pre>
+        </details>
+      </aside>
+
+      <aside className={showSalesDrawer ? "side-drawer side-drawer--open side-drawer--sales" : "side-drawer side-drawer--sales"}>
+        <div className="side-drawer-head">
+          <h3>{t(lang, "customerCartCheckout")}</h3>
+          <button className="inline-btn" onClick={() => setShowSalesDrawer(false)}>{t(lang, "close")}</button>
+        </div>
+        <p className="drawer-subtitle">{t(lang, "createItemsAndCheckout")}</p>
+        <div className="control-group">
+          <div className="form-grid">
+            <label>
+              {t(lang, "customer")}
+              <select value={selectedCustomerId} onChange={(e) => setSelectedCustomerId(e.target.value)}>
+                {customers.map((customer) => (
+                  <option key={customer.id} value={customer.id}>{customer.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {t(lang, "zoneLabel")}
+              <select value={saleZoneId} onChange={(e) => setSaleZoneId(e.target.value as InventoryZoneId)}>
+                {salesEnabledLocations.map((zone) => (
+                  <option key={zone.id} value={zone.id}>
+                    {zone.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {t(lang, "sku")}
+              <select value={saleForm.skuId} onChange={(e) => setSaleForm((v) => ({ ...v, skuId: e.target.value }))}>
+                {saleSkuAvailability.map((sku) => (
+                  <option key={sku.skuId} value={sku.skuId} disabled={sku.availableQty <= 0}>
+                    {sku.skuId} ({sku.source}) - {sku.availableQty} {t(lang, "unitsSuffix")}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {t(lang, "qty")}
+              <input
+                type="number"
+                min={1}
+                max={Math.max(1, maxSaleQty)}
+                value={saleForm.qty}
+                onChange={(e) =>
+                  setSaleForm((v) => {
+                    const raw = Number(e.target.value);
+                    if (!Number.isFinite(raw)) return v;
+                    const clamped = Math.max(1, Math.min(raw, Math.max(1, maxSaleQty)));
+                    return { ...v, qty: clamped };
+                  })
+                }
+              />
+            </label>
+          </div>
+          <button className="action-btn" disabled={!canAddToCart} onClick={createPosSale}>{t(lang, "addItemToCart")}</button>
+          {salesStatusMessage ? <p className="drawer-subtitle">{salesStatusMessage}</p> : null}
+        </div>
+        <div className="control-group">
+          <div className="inventory-available-item">
+            <div>
+              <strong>{customers.find((customer) => customer.id === selectedCustomerId)?.name ?? selectedCustomerId}</strong>
+              <small>{customerBasket.length} {t(lang, "items")}</small>
+            </div>
+            <div className="staff-item-actions">
+              <button className="action-btn" disabled={customerBasket.length === 0} onClick={() => checkoutCustomer(selectedCustomerId)}>
+                {t(lang, "checkoutCustomer")}
+              </button>
+            </div>
+          </div>
+        </div>
+        <details className="drawer-accordion" open>
+          <summary>{t(lang, "customerItemsInCart")}</summary>
+          <div className="inventory-available-list">
+            {customerBasket.length === 0 ? (
+              <p className="empty">{t(lang, "noItemsInCart")}</p>
+            ) : (
+              customerBasket.map((item) => {
+                const source = SKU_SOURCE_BY_ID.get(item.skuId) ?? "NON_RFID";
+                const state = getCartItemState(source, item.qty, item.pickedConfirmedQty);
+                return (
+                  <div key={item.id} className="inventory-available-item">
+                    <div>
+                      <strong>{item.skuId}</strong>
+                      <small>{item.zoneId} · {source}</small>
+                    </div>
+                    <div className="inventory-available-metrics">
+                      <strong>{item.qty} {t(lang, "unitsSuffix")}</strong>
+                      <small>{t(lang, "pickedRfid")}: {item.pickedConfirmedQty}</small>
+                      <span className={`state-badge state-badge--${state.toLowerCase()}`}>{state}</span>
+                      <button className="inline-btn" onClick={() => removeCustomerItem(item.id)}>{t(lang, "remove")}</button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+          <p className="drawer-subtitle">{t(lang, "tipRfidPulse")}</p>
+        </details>
+        <details className="drawer-accordion" open>
+          <summary>{t(lang, "otherCustomersInProgress")}</summary>
+          <div className="inventory-available-list">
+            {otherCustomersInProgress.length === 0 ? (
+              <p className="empty">{t(lang, "noOtherCustomersInProgress")}</p>
+            ) : (
+              otherCustomersInProgress.map((entry) => (
+                <div key={entry.customerId} className="inventory-available-item">
+                  <div>
+                    <strong>{entry.customerName}</strong>
+                    <small>{entry.customerId}</small>
+                  </div>
+                  <div className="inventory-available-metrics">
+                    <strong>{entry.items.length} {t(lang, "items")}</strong>
+                    <small>
+                      {entry.items
+                        .map((item) => {
+                          const source = SKU_SOURCE_BY_ID.get(item.skuId) ?? "NON_RFID";
+                          return `${item.skuId} x${item.qty} (${item.zoneId}, ${source})`;
+                        })
+                        .join(" | ")}
+                    </small>
+                    <button className="inline-btn" onClick={() => checkoutCustomer(entry.customerId)}>
+                      {t(lang, "checkoutCustomer")}
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
+      </aside>
+    </main>
+  );
+}

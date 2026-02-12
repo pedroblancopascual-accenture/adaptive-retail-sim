@@ -1,0 +1,15 @@
+{
+  "summary": {
+    "zones": 8,
+    "antennas_per_zone": 1,
+    "skus": { "rfid": 3, "non_rfid": 2 },
+    "epcs": 10,
+    "replenishment_rules": 2,
+    "rfid_read_events": 10,
+    "sales_events": 4
+  },
+  "simulation_expected": {
+    "trigger_alert": "SKU-NR-1 in zone-shelf-a drops to qty=1, below min=2",
+    "completion": "Confirm task with qty=7 returns zone-shelf-a SKU-NR-1 to qty=8"
+  }
+}

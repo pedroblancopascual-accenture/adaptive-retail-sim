@@ -1,0 +1,67 @@
+{
+  "POST /rfid/read": {
+    "request": {
+      "id": "rr-1001",
+      "epc": "EPC-0001",
+      "antennaId": "ant-z1-1",
+      "zoneId": "zone-shelf-b",
+      "timestamp": "2026-02-10T10:00:05Z",
+      "rssi": -55.2,
+      "ingestedAt": "2026-02-10T10:00:05Z"
+    },
+    "response": {
+      "status": "accepted",
+      "eventId": "rr-1001",
+      "skuId": "SKU-RFID-1",
+      "zoneId": "zone-shelf-b"
+    }
+  },
+  "POST /sales/event": {
+    "request": {
+      "id": "sale-2001",
+      "skuId": "SKU-NR-1",
+      "zoneId": "zone-shelf-a",
+      "eventType": "SALE",
+      "qty": 2,
+      "timestamp": "2026-02-10T10:02:00Z",
+      "posTxnId": "POS-77881",
+      "ingestedAt": "2026-02-10T10:02:00Z"
+    },
+    "response": {
+      "status": "accepted",
+      "eventId": "sale-2001",
+      "recalculationTriggered": true
+    }
+  },
+  "GET /inventory/zones": {
+    "response": {
+      "asOf": "2026-02-10T10:05:00Z",
+      "zones": []
+    }
+  },
+  "GET /inventory/zones/{zoneId}": {
+    "response": {
+      "zone": {},
+      "inventory": [],
+      "openTasks": []
+    }
+  },
+  "GET /replenishment/tasks": {
+    "response": {
+      "tasks": []
+    }
+  },
+  "POST /replenishment/tasks/{id}/confirm": {
+    "request": {
+      "confirmedQty": 7,
+      "confirmedBy": "associate-12",
+      "confirmedAt": "2026-02-10T10:08:00Z"
+    },
+    "response": {
+      "id": "task-1",
+      "status": "COMPLETED",
+      "closedAt": "2026-02-10T10:08:00Z",
+      "inventoryRecalculated": true
+    }
+  }
+}

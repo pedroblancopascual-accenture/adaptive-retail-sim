@@ -1,0 +1,45 @@
+{
+  "mapSize": { "width": 1536, "height": 1117 },
+  "inventoryLinkedZones": [
+    {
+      "shopfloorZoneId": "sf-sales-core",
+      "inventoryZoneId": "zone-shelf-a",
+      "polygon": [
+        { "x": 180, "y": 170 },
+        { "x": 1060, "y": 170 },
+        { "x": 1060, "y": 785 },
+        { "x": 180, "y": 785 }
+      ]
+    },
+    {
+      "shopfloorZoneId": "sf-stockroom",
+      "inventoryZoneId": "zone-warehouse",
+      "polygon": [
+        { "x": 1108, "y": 52 },
+        { "x": 1492, "y": 52 },
+        { "x": 1492, "y": 323 },
+        { "x": 1108, "y": 323 }
+      ]
+    },
+    {
+      "shopfloorZoneId": "sf-feature-table",
+      "inventoryZoneId": "zone-shelf-b",
+      "polygon": [
+        { "x": 860, "y": 238 },
+        { "x": 1060, "y": 238 },
+        { "x": 1060, "y": 510 },
+        { "x": 860, "y": 510 }
+      ]
+    }
+  ],
+  "antennas": [
+    { "id": "ant-woman-1", "x": 515, "y": 235 },
+    { "id": "ant-kids-1", "x": 930, "y": 330 },
+    { "id": "ant-warehouse-1", "x": 1298, "y": 190 },
+    { "id": "ant-cashier-1", "x": 1165, "y": 835 },
+    { "id": "ant-fitting-1", "x": 315, "y": 860 },
+    { "id": "ant-entrance-1", "x": 770, "y": 1068 },
+    { "id": "ant-aisle-east-1", "x": 1210, "y": 520 },
+    { "id": "ant-men-1", "x": 196, "y": 294 }
+  ]
+}
