@@ -62,7 +62,7 @@ export const sampleDataset: SampleDataset = {
         { x: 244.3917525773196, y: 128.39588310681455 }
       ],
       antennaIds: ["ant-woman-1"],
-      ruleIds: ["rule-nr-1"],
+      ruleIds: ["rule-nr-1", "rule-woman-nr-2"],
       isSalesLocation: true,
       replenishmentSources: [{ sourceZoneId: "zone-warehouse", sortOrder: 1 }],
       isActive: true,
@@ -394,6 +394,17 @@ export const sampleDataset: SampleDataset = {
       source: "RFID",
       minQty: 1,
       maxQty: 4,
+      priority: 2,
+      isActive: true,
+      updatedAt: "2026-02-10T09:00:00Z"
+    },
+    {
+      id: "rule-woman-nr-2",
+      zoneId: "zone-shelf-a",
+      skuId: "SKU-NR-2",
+      source: "NON_RFID",
+      minQty: 5,
+      maxQty: 9,
       priority: 2,
       isActive: true,
       updatedAt: "2026-02-10T09:00:00Z"

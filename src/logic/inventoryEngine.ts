@@ -133,9 +133,6 @@ export class InventoryEngine {
     this.nowCursor = "2026-02-10T10:00:00Z";
     this.generatedEpcSeq = dataset.epcSkuMapping.length + 1;
 
-    this.upsertCustomer({ id: "cust-001", name: "Customer 001" });
-    this.upsertCustomer({ id: "cust-002", name: "Customer 002" });
-    this.upsertCustomer({ id: "cust-003", name: "Customer 003" });
   }
 
   seedDemoEvents(): void {
@@ -287,10 +284,36 @@ export class InventoryEngine {
         this.evaluateInboundReceivingNeed(zone, rule, currentQty);
         continue;
       }
-      const openTasks = this.tasks
+      let openTasks = this.tasks
         .filter((t) => t.ruleId === rule.id && taskIsOpen(t.status))
         .sort((a, b) => toMs(a.createdAt) - toMs(b.createdAt));
-      const autoRejectableTasks = openTasks.filter((task) => task.status !== "IN_PROGRESS");
+      let autoRejectableTasks = openTasks.filter((task) => task.status !== "IN_PROGRESS");
+
+      // Keep a single open task per SKU/rule when the destination effectively has one source.
+      // Multi-source locations are intentionally allowed to split need across multiple tasks.
+      if (autoRejectableTasks.length > 1) {
+        const distinctTaskSources = new Set(
+          autoRejectableTasks.map((task) => task.sourceZoneId ?? "__none__")
+        );
+        const singleSourceDestination = zone.replenishmentSources.length <= 1;
+        const singleTaskSource = distinctTaskSources.size <= 1;
+        if (singleSourceDestination || singleTaskSource) {
+          const keeper = autoRejectableTasks[0];
+          const mergedDeficit = autoRejectableTasks.reduce(
+            (sum, task) => sum + Math.max(0, task.deficitQty),
+            0
+          );
+          keeper.deficitQty = mergedDeficit;
+          keeper.updatedAt = this.nowCursor;
+          for (const extraTask of autoRejectableTasks.slice(1)) {
+            this.closeReplenishmentTask(extraTask.id, "merged_plan");
+          }
+          openTasks = this.tasks
+            .filter((t) => t.ruleId === rule.id && taskIsOpen(t.status))
+            .sort((a, b) => toMs(a.createdAt) - toMs(b.createdAt));
+          autoRejectableTasks = openTasks.filter((task) => task.status !== "IN_PROGRESS");
+        }
+      }
 
       if (currentQty >= rule.maxQty) {
         for (const task of autoRejectableTasks) {

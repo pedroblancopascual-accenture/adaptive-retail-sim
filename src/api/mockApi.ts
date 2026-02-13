@@ -569,6 +569,17 @@ export const api = {
     return engine.getCustomers();
   },
 
+  upsertCustomer(payload: { id: string; name: string; timestamp: string }) {
+    const customer = engine.upsertCustomer({ id: payload.id, name: payload.name });
+    pushFlow({
+      at: payload.timestamp,
+      type: "CUSTOMER_PICK",
+      title: "Customer cart created",
+      details: `customer=${customer.id} name=${customer.name}`
+    });
+    return { ...customer };
+  },
+
   addCustomerItem(payload: {
     customerId: string;
     zoneId: string;

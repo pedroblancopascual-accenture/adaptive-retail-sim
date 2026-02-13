@@ -28,9 +28,25 @@ type CatalogRoleValue = "player" | "goalkeeper" | "staff";
 type CatalogQualityValue = "match" | "stadium";
 type CatalogFilterKey = "SOURCE" | "KIT" | "AGE_GROUP" | "GENDER" | "ROLE" | "QUALITY";
 type RuleTemplateSelectorMode = "SKU" | "ATTRIBUTES";
+type CartMarkerAnimation = {
+  customerId: string;
+  customerName: string;
+  originZoneId: string;
+  startedAt: number;
+};
+type ExitMarkerAnimation = {
+  id: string;
+  customerId: string;
+  customerName: string;
+  startedAt: number;
+};
 const SHOPFLOOR_SIZE = { width: 1536, height: 1117 };
 const AUTO_SWEEP_INTERVAL_SEC = 30;
 const ALL_LOCATIONS_OPTION_ID = "__all_locations__";
+const CART_TRAVEL_MS = 4200;
+const CART_EXIT_MS = 1600;
+const REPLENISHMENT_TRAVEL_MS = 1400;
+const REPLENISHMENT_CONFIRM_FADE_MS = 1800;
 const ALL_SKUS = sampleDataset.skus;
 const SKU_SOURCE_BY_ID = new Map(ALL_SKUS.map((sku) => [sku.id, sku.source]));
 
@@ -75,6 +91,86 @@ function toDurationLabel(totalSeconds: number): string {
   return `${s}s`;
 }
 
+function parseCustomerSeq(customerId: string): number {
+  const match = customerId.match(/cust-(\d+)/i);
+  if (!match) return 0;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function quadraticPoint(
+  x1: number,
+  y1: number,
+  cx: number,
+  cy: number,
+  x2: number,
+  y2: number,
+  t: number
+): { x: number; y: number } {
+  const inv = 1 - t;
+  return {
+    x: inv * inv * x1 + 2 * inv * t * cx + t * t * x2,
+    y: inv * inv * y1 + 2 * inv * t * cy + t * t * y2
+  };
+}
+
+function buildQuadraticSegmentPath(
+  x1: number,
+  y1: number,
+  cx: number,
+  cy: number,
+  x2: number,
+  y2: number,
+  startT: number,
+  endT: number,
+  steps = 14
+): string {
+  const a = Math.max(0, Math.min(1, startT));
+  const b = Math.max(0, Math.min(1, endT));
+  if (b - a <= 0.0001) return "";
+  const points: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const t = a + ((b - a) * i) / steps;
+    points.push(quadraticPoint(x1, y1, cx, cy, x2, y2, t));
+  }
+  return points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .join(" ");
+}
+
+function buildArrowPolygonOnQuadratic(
+  x1: number,
+  y1: number,
+  cx: number,
+  cy: number,
+  x2: number,
+  y2: number,
+  t: number
+): string {
+  const px =
+    (1 - t) * (1 - t) * x1 +
+    2 * (1 - t) * t * cx +
+    t * t * x2;
+  const py =
+    (1 - t) * (1 - t) * y1 +
+    2 * (1 - t) * t * cy +
+    t * t * y2;
+  const tx = 2 * (1 - t) * (cx - x1) + 2 * t * (x2 - cx);
+  const ty = 2 * (1 - t) * (cy - y1) + 2 * t * (y2 - cy);
+  const norm = Math.max(0.0001, Math.hypot(tx, ty));
+  const ux = tx / norm;
+  const uy = ty / norm;
+  const nx = -uy;
+  const ny = ux;
+  const tipX = px + ux * 8;
+  const tipY = py + uy * 8;
+  const leftX = px - ux * 2.8 + nx * 3.6;
+  const leftY = py - uy * 2.8 + ny * 3.6;
+  const rightX = px - ux * 2.8 - nx * 3.6;
+  const rightY = py - uy * 2.8 - ny * 3.6;
+  return `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`;
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(() => {
     const stored = localStorage.getItem("sim-lang");
@@ -92,8 +188,8 @@ export default function App() {
   const [flow, setFlow] = useState(api.getFlowEvents());
   const [taskAudit, setTaskAudit] = useState(api.getTaskAudit());
   const [customers, setCustomers] = useState(api.getCustomers());
-  const [selectedCustomerId, setSelectedCustomerId] = useState(api.getCustomers()[0]?.id ?? "cust-001");
-  const [customerBasket, setCustomerBasket] = useState(api.getCustomerBasket(api.getCustomers()[0]?.id ?? "cust-001"));
+  const [selectedCustomerId, setSelectedCustomerId] = useState(api.getCustomers()[0]?.id ?? "");
+  const [customerBasket, setCustomerBasket] = useState(api.getCustomerBasket(api.getCustomers()[0]?.id ?? ""));
   const [showZoneDrawer, setShowZoneDrawer] = useState(false);
   const [zoneDrawerSection, setZoneDrawerSection] = useState<ZoneDrawerSection>("inventory");
   const [mainContentView, setMainContentView] = useState<MainContentView>("map");
@@ -106,6 +202,7 @@ export default function App() {
   const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
   const [mapEditMode, setMapEditMode] = useState(false);
   const [showMapZones, setShowMapZones] = useState(true);
+  const [showMapLegend, setShowMapLegend] = useState(false);
   const [mapZoom, setMapZoom] = useState(1);
   const [mapPan, setMapPan] = useState({ x: 0, y: 0 });
   const [isMapPanning, setIsMapPanning] = useState(false);
@@ -134,6 +231,7 @@ export default function App() {
   const mapViewportRef = useRef<HTMLDivElement | null>(null);
   const suppressMapClickRef = useRef(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const prevTaskStatusRef = useRef<Record<string, string>>({});
 
   const [ruleForm, setRuleForm] = useState<{
     skuId: string;
@@ -178,6 +276,10 @@ export default function App() {
   const [catalogPendingFilterKey, setCatalogPendingFilterKey] = useState<CatalogFilterKey | "">("");
   const [catalogFilterSearch, setCatalogFilterSearch] = useState("");
   const [catalogMapSkuId, setCatalogMapSkuId] = useState<string | null>(null);
+  const [cartMarkers, setCartMarkers] = useState<Record<string, CartMarkerAnimation>>({});
+  const [exitMarkers, setExitMarkers] = useState<ExitMarkerAnimation[]>([]);
+  const [confirmedReplenishmentFx, setConfirmedReplenishmentFx] = useState<Record<string, number>>({});
+  const [animationTick, setAnimationTick] = useState(Date.now());
   const [rulesLocationFilter, setRulesLocationFilter] = useState<string>("all");
   const [rulesFormMode, setRulesFormMode] = useState<"closed" | "create" | "edit">("closed");
   const [ruleCenterForm, setRuleCenterForm] = useState<{
@@ -357,6 +459,10 @@ export default function App() {
       { id: "REJECTED", label: t(lang, "taskFilterStatusRejected") }
     ],
     [lang]
+  );
+  const taskStatusLabelById = useMemo(
+    () => new Map(taskHubStatusOptions.map((option) => [option.id, option.label] as const)),
+    [taskHubStatusOptions]
   );
   const taskHubTypeOptions = useMemo(
     () => [
@@ -1065,23 +1171,24 @@ export default function App() {
     saleForm.qty > 0 &&
     saleForm.qty <= maxSaleQty;
 
-  const otherCustomersInProgress = useMemo(() => {
+  const customersInProgress = useMemo(() => {
     return customers
-      .filter((customer) => customer.id !== selectedCustomerId)
       .map((customer) => ({
         customerId: customer.id,
         customerName: customer.name,
         items: api.getCustomerBasket(customer.id)
       }))
       .filter((entry) => entry.items.length > 0);
-  }, [customers, selectedCustomerId, customerBasket]);
+  }, [customers, customerBasket, flow]);
 
-  const salesInProgressCount = useMemo(() => {
-    return customers.reduce((count, customer) => {
-      const items = api.getCustomerBasket(customer.id);
-      return items.length > 0 ? count + 1 : count;
-    }, 0);
-  }, [customers, customerBasket]);
+  const otherCustomersInProgress = useMemo(() => {
+    return customersInProgress.filter((entry) => entry.customerId !== selectedCustomerId);
+  }, [customersInProgress, selectedCustomerId]);
+
+  const salesInProgressCount = useMemo(
+    () => customersInProgress.length,
+    [customersInProgress]
+  );
 
   useEffect(() => {
     if (selectedZoneSkuOptions.length === 0) return;
@@ -1111,9 +1218,237 @@ export default function App() {
     });
   }, [zoneRules, ruleForm.skuId, ruleForm.source]);
 
+  const zoneCenterById = useMemo(() => {
+    const byId = new Map<string, { x: number; y: number }>();
+    for (const location of locations) {
+      if (location.mapPolygon.length < 3) continue;
+      byId.set(location.id, polygonCenter(location.mapPolygon));
+    }
+    return byId;
+  }, [locations]);
+
+  const cashierCenter = zoneCenterById.get("zone-cashier") ?? { x: 1200, y: 835 };
+  const entranceCenter = zoneCenterById.get("zone-entrance") ?? { x: 770, y: 1060 };
+
+  const activeCustomerMapMarkers = useMemo(() => {
+    return customersInProgress.map((entry) => {
+      const marker = cartMarkers[entry.customerId];
+      const startedAt = marker?.startedAt ?? animationTick;
+      const originZoneId = marker?.originZoneId ?? entry.items[0]?.zoneId ?? "zone-cashier";
+      const origin = zoneCenterById.get(originZoneId) ?? cashierCenter;
+      const progressRaw = Math.max(0, Math.min(1, (animationTick - startedAt) / CART_TRAVEL_MS));
+      const progress = 1 - Math.pow(1 - progressRaw, 2);
+      return {
+        id: entry.customerId,
+        cartsCount: customersInProgress.length,
+        progressRaw,
+        x: origin.x + (cashierCenter.x - origin.x) * progress,
+        y: origin.y + (cashierCenter.y - origin.y) * progress
+      };
+    });
+  }, [customersInProgress, cartMarkers, animationTick, zoneCenterById, cashierCenter]);
+
+  const showFinalCartBadge = useMemo(() => {
+    if (activeCustomerMapMarkers.length <= 1) return false;
+    return activeCustomerMapMarkers.every((marker) => marker.progressRaw >= 0.98);
+  }, [activeCustomerMapMarkers]);
+
+  const exitingCustomerMapMarkers = useMemo(() => {
+    return exitMarkers.map((entry) => {
+      const progressRaw = Math.max(0, Math.min(1, (animationTick - entry.startedAt) / CART_EXIT_MS));
+      const progress = Math.pow(progressRaw, 0.9);
+      return {
+        id: entry.id,
+        opacity: 1 - progressRaw,
+        x: cashierCenter.x + (entranceCenter.x - cashierCenter.x) * progress,
+        y: cashierCenter.y + (entranceCenter.y - cashierCenter.y) * progress
+      };
+    });
+  }, [exitMarkers, animationTick, cashierCenter, entranceCenter]);
+
+  const replenishmentFlowMarkers = useMemo(() => {
+    return tasks.tasks
+      .filter((task) => task.sourceZoneId && task.status !== "REJECTED")
+      .map((task) => {
+        const source = zoneCenterById.get(task.sourceZoneId as string);
+        const destination = zoneCenterById.get(task.zoneId);
+        if (!source || !destination) return null;
+
+        const dx = destination.x - source.x;
+        const dy = destination.y - source.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance < 6) return null;
+        const ux = dx / distance;
+        const uy = dy / distance;
+
+        const x1 = source.x + ux * 22;
+        const y1 = source.y + uy * 22;
+        const x2 = destination.x - ux * 24;
+        const y2 = destination.y - uy * 24;
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+        const nx = -uy;
+        const ny = ux;
+        const seed = Number(task.id.replace(/\D/g, "")) || 1;
+        const curveSign = seed % 2 === 0 ? 1 : -1;
+        const curveAmp = Math.min(52, Math.max(16, distance * 0.12)) * curveSign;
+        const cx = mx + nx * curveAmp;
+        const cy = my + ny * curveAmp;
+        const path = `M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`;
+
+        if (task.status === "CONFIRMED") {
+          const startedAt = confirmedReplenishmentFx[task.id];
+          if (!startedAt) return null;
+          const elapsed = animationTick - startedAt;
+          if (elapsed > REPLENISHMENT_CONFIRM_FADE_MS) return null;
+          return {
+            id: task.id,
+            x1,
+            y1,
+            x2,
+            y2,
+            cx,
+            cy,
+            path,
+            opacity: Math.max(0, 1 - elapsed / REPLENISHMENT_CONFIRM_FADE_MS),
+            status: "confirmed" as const,
+            progress: 0
+          };
+        }
+
+        if (task.status === "IN_PROGRESS") {
+          const phase = ((animationTick + seed * 137) % REPLENISHMENT_TRAVEL_MS) / REPLENISHMENT_TRAVEL_MS;
+          return { id: task.id, x1, y1, x2, y2, cx, cy, path, opacity: 1, status: "moving" as const, progress: phase };
+        }
+
+        if (task.status === "CREATED" || task.status === "ASSIGNED") {
+          const pendingPhase = ((animationTick + seed * 173) % (REPLENISHMENT_TRAVEL_MS * 1.9)) / (REPLENISHMENT_TRAVEL_MS * 1.9);
+          return { id: task.id, x1, y1, x2, y2, cx, cy, path, opacity: 1, status: "pending" as const, progress: pendingPhase };
+        }
+
+        return null;
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+  }, [tasks.tasks, zoneCenterById, confirmedReplenishmentFx, animationTick]);
+
+  const legendFlowMarkers = useMemo(() => {
+    const x1 = 2;
+    const y1 = 12;
+    const cx = 26;
+    const cy = 2;
+    const x2 = 54;
+    const y2 = 8;
+    const pendingPhase = (animationTick % (REPLENISHMENT_TRAVEL_MS * 1.9)) / (REPLENISHMENT_TRAVEL_MS * 1.9);
+    const movingPhase = (animationTick % REPLENISHMENT_TRAVEL_MS) / REPLENISHMENT_TRAVEL_MS;
+    const pendingTrailStart = Math.max(0, pendingPhase - 0.2);
+    const pendingFadeStart = Math.max(0, pendingTrailStart - 0.12);
+    const movingTrailStart = Math.max(0, movingPhase - 0.26);
+    const movingFadeStart = Math.max(0, movingTrailStart - 0.16);
+
+    return {
+      pending: {
+        fadePath: buildQuadraticSegmentPath(x1, y1, cx, cy, x2, y2, pendingFadeStart, pendingTrailStart, 12),
+        trailPath: buildQuadraticSegmentPath(x1, y1, cx, cy, x2, y2, pendingTrailStart, pendingPhase, 12),
+        arrow: buildArrowPolygonOnQuadratic(x1, y1, cx, cy, x2, y2, pendingPhase)
+      },
+      moving: {
+        fadePath: buildQuadraticSegmentPath(x1, y1, cx, cy, x2, y2, movingFadeStart, movingTrailStart, 12),
+        trailPath: buildQuadraticSegmentPath(x1, y1, cx, cy, x2, y2, movingTrailStart, movingPhase, 12),
+        arrow: buildArrowPolygonOnQuadratic(x1, y1, cx, cy, x2, y2, movingPhase)
+      },
+      confirmed: {
+        path: `M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`,
+        arrow: buildArrowPolygonOnQuadratic(x1, y1, cx, cy, x2, y2, 1)
+      }
+    };
+  }, [animationTick]);
+
   useEffect(() => {
+    const now = Date.now();
+    const prev = prevTaskStatusRef.current;
+    const next: Record<string, string> = {};
+    const justConfirmed: Record<string, number> = {};
+
+    for (const task of tasks.tasks) {
+      next[task.id] = task.status;
+      if (task.status === "CONFIRMED" && prev[task.id] !== "CONFIRMED") {
+        justConfirmed[task.id] = now;
+      }
+    }
+
+    prevTaskStatusRef.current = next;
+    if (Object.keys(justConfirmed).length > 0) {
+      setConfirmedReplenishmentFx((current) => ({ ...current, ...justConfirmed }));
+    }
+  }, [tasks.tasks]);
+
+  useEffect(() => {
+    setConfirmedReplenishmentFx((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const [taskId, startedAt] of Object.entries(current)) {
+        if (animationTick - startedAt > REPLENISHMENT_CONFIRM_FADE_MS + 180) {
+          delete next[taskId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [animationTick]);
+
+  useEffect(() => {
+    if (!selectedCustomerId) {
+      setCustomerBasket([]);
+      return;
+    }
     setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
   }, [selectedCustomerId]);
+
+  useEffect(() => {
+    if (customers.length === 0) {
+      if (selectedCustomerId !== "") setSelectedCustomerId("");
+      return;
+    }
+    if (!selectedCustomerId || !customers.some((entry) => entry.id === selectedCustomerId)) {
+      setSelectedCustomerId(customers[0].id);
+    }
+  }, [customers, selectedCustomerId]);
+
+  useEffect(() => {
+    const activeByCustomer = new Map(
+      customersInProgress.map((entry) => [entry.customerId, entry] as const)
+    );
+
+    setCartMarkers((prev) => {
+      const next: Record<string, CartMarkerAnimation> = {};
+      const now = Date.now();
+      for (const [customerId, entry] of activeByCustomer.entries()) {
+        const existing = prev[customerId];
+        const originZoneId = existing?.originZoneId ?? entry.items[0]?.zoneId ?? "zone-cashier";
+        next[customerId] = existing ?? {
+          customerId,
+          customerName: entry.customerName,
+          originZoneId,
+          startedAt: now
+        };
+      }
+      return next;
+    });
+  }, [customersInProgress]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setAnimationTick(Date.now()), 120);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (exitMarkers.length === 0) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setExitMarkers((prev) => prev.filter((entry) => now - entry.startedAt < CART_EXIT_MS + 200));
+    }, 120);
+    return () => window.clearInterval(timer);
+  }, [exitMarkers]);
 
   useEffect(() => {
     if (selectedZone !== "all") {
@@ -1407,8 +1742,24 @@ export default function App() {
     return new Date(base + offsetSec * 1000).toISOString();
   }
 
+  function createAutoCustomer(
+    timestamp = eventTs(8),
+    refreshAfter = true
+  ): { id: string; name: string } {
+    const maxSeq = customers.reduce((max, customer) => Math.max(max, parseCustomerSeq(customer.id)), 0);
+    const nextSeq = maxSeq + 1;
+    const id = `cust-${String(nextSeq).padStart(3, "0")}`;
+    const name = `Customer ${String(nextSeq).padStart(3, "0")}`;
+    const created = api.upsertCustomer({ id, name, timestamp });
+    setSelectedCustomerId(created.id);
+    setCustomerBasket(api.getCustomerBasket(created.id));
+    if (refreshAfter) {
+      refresh();
+    }
+    return created;
+  }
+
   function resetSalesFormOnOpen(): void {
-    const defaultCustomerId = customers[0]?.id ?? "cust-001";
     const defaultZoneId = salesEnabledLocations[0]?.id ?? "zone-shelf-a";
     const zoneInventory = dashboard.zones.find((zone) => zone.zoneId === defaultZoneId)?.inventory ?? [];
     const defaultSkuId =
@@ -1420,8 +1771,8 @@ export default function App() {
       ALL_SKUS[0]?.id ??
       "SKU-NR-1";
 
-    setSelectedCustomerId(defaultCustomerId);
-    setCustomerBasket(api.getCustomerBasket(defaultCustomerId));
+    setSelectedCustomerId("");
+    setCustomerBasket([]);
     setSaleZoneId(defaultZoneId);
     setSaleForm({ skuId: defaultSkuId, qty: 1 });
     setSalesStatusMessage("");
@@ -1609,7 +1960,10 @@ export default function App() {
     }
   }
 
-  function createPosSale(): void {
+  function createPosSale(forceNewCart = false): void {
+    const activeCustomerId = forceNewCart
+      ? createAutoCustomer(eventTs(9), false).id
+      : (selectedCustomerId || createAutoCustomer(eventTs(9), false).id);
     const availableQty = availableBySku.get(saleForm.skuId) ?? 0;
     if (saleForm.qty > availableQty) {
       setSalesStatusMessage(
@@ -1619,7 +1973,7 @@ export default function App() {
     }
 
     const result = api.addCustomerItem({
-      customerId: selectedCustomerId,
+      customerId: activeCustomerId,
       zoneId: saleZoneId,
       skuId: saleForm.skuId,
       qty: Number(saleForm.qty),
@@ -1634,13 +1988,27 @@ export default function App() {
     } else {
       setSalesStatusMessage(t(lang, "itemAdded", { status: result.status }));
     }
-    setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
+    setSelectedCustomerId(activeCustomerId);
+    setCustomerBasket(api.getCustomerBasket(activeCustomerId));
     refresh();
   }
 
   function checkoutCustomer(customerId = selectedCustomerId): void {
+    if (!customerId) return;
     const result = api.checkoutCustomer({ customerId, timestamp: eventTs(20) });
     setSalesStatusMessage(t(lang, "checkoutResult", { status: result.status, soldItems: result.soldItems }));
+    if (result.status === "checked_out" && result.soldItems > 0) {
+      const customerName = customers.find((entry) => entry.id === customerId)?.name ?? customerId;
+      setExitMarkers((prev) => [
+        ...prev,
+        {
+          id: `${customerId}-${Date.now()}`,
+          customerId,
+          customerName,
+          startedAt: Date.now()
+        }
+      ]);
+    }
     setCustomerBasket(api.getCustomerBasket(selectedCustomerId));
     refresh();
   }
@@ -2310,7 +2678,7 @@ export default function App() {
                 {zoneOrder.map((zoneId) => {
                   const zoneKpi = dashboard.zones.find((z) => z.zoneId === zoneId);
                   const location = locations.find((entry) => entry.id === zoneId);
-                  const low = (zoneKpi?.lowStockCount ?? 0) > 0;
+                  const low = (zoneKpi?.lowStockCount ?? 0) > 0 || (zoneKpi?.openTaskCount ?? 0) > 0;
                   return (
                   <button
                     key={zoneId}
@@ -2387,7 +2755,75 @@ export default function App() {
                   👁
                 </span>
               </button>
+              <button
+                className="map-zoom-btn map-zoom-btn--toggle map-zoom-btn--info"
+                type="button"
+                aria-label={t(lang, "mapFlowLegend")}
+                title={t(lang, "mapFlowLegend")}
+                onClick={() => setShowMapLegend((prev) => !prev)}
+              >
+                <span className="map-info-pin" aria-hidden="true">
+                  <span className="map-info-pin-inner">i</span>
+                </span>
+              </button>
             </div>
+            {showMapLegend ? (
+              <div className="map-flow-legend-popover">
+                <strong>{t(lang, "mapFlowLegend")}</strong>
+                <div className="map-flow-legend-row">
+                  <svg className="map-flow-legend-svg" viewBox="0 0 56 16" aria-hidden="true">
+                    {legendFlowMarkers.pending.fadePath ? (
+                      <path
+                        d={legendFlowMarkers.pending.fadePath}
+                        className="map-flow-legend-trail-fade map-flow-legend-trail-fade--pending"
+                      />
+                    ) : null}
+                    {legendFlowMarkers.pending.trailPath ? (
+                      <path
+                        d={legendFlowMarkers.pending.trailPath}
+                        className="map-flow-legend-trail map-flow-legend-trail--pending"
+                      />
+                    ) : null}
+                    <polygon
+                      className="map-flow-legend-arrow map-flow-legend-arrow--pending"
+                      points={legendFlowMarkers.pending.arrow}
+                    />
+                  </svg>
+                  <small>{t(lang, "mapFlowLegendPending")}</small>
+                </div>
+                <div className="map-flow-legend-row">
+                  <svg className="map-flow-legend-svg" viewBox="0 0 56 16" aria-hidden="true">
+                    {legendFlowMarkers.moving.fadePath ? (
+                      <path
+                        d={legendFlowMarkers.moving.fadePath}
+                        className="map-flow-legend-trail-fade map-flow-legend-trail-fade--moving"
+                      />
+                    ) : null}
+                    {legendFlowMarkers.moving.trailPath ? (
+                      <path
+                        d={legendFlowMarkers.moving.trailPath}
+                        className="map-flow-legend-trail map-flow-legend-trail--moving"
+                      />
+                    ) : null}
+                    <polygon
+                      className="map-flow-legend-arrow map-flow-legend-arrow--moving"
+                      points={legendFlowMarkers.moving.arrow}
+                    />
+                  </svg>
+                  <small>{t(lang, "mapFlowLegendInTransit")}</small>
+                </div>
+                <div className="map-flow-legend-row">
+                  <svg className="map-flow-legend-svg" viewBox="0 0 56 16" aria-hidden="true">
+                    <path d={legendFlowMarkers.confirmed.path} className="map-flow-legend-confirmed" />
+                    <polygon
+                      className="map-flow-legend-arrow map-flow-legend-arrow--confirmed"
+                      points={legendFlowMarkers.confirmed.arrow}
+                    />
+                  </svg>
+                  <small>{t(lang, "mapFlowLegendConfirmed")}</small>
+                </div>
+              </div>
+            ) : null}
             <svg
               ref={svgRef}
               className={mapEditMode ? "shopfloor shopfloor--editing" : "shopfloor"}
@@ -2406,6 +2842,22 @@ export default function App() {
                   <stop offset="0%" stopColor="#5eead4" stopOpacity="0.55" />
                   <stop offset="100%" stopColor="#0f172a" stopOpacity="0" />
                 </radialGradient>
+                <linearGradient id="replenishment-line-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="#60a5fa" />
+                  <stop offset="52%" stopColor="#2563eb" />
+                  <stop offset="100%" stopColor="#1d4ed8" />
+                </linearGradient>
+                <linearGradient id="replenishment-arrow-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#93c5fd" />
+                  <stop offset="100%" stopColor="#1d4ed8" />
+                </linearGradient>
+                <marker id="replenishment-arrow-pending" viewBox="0 0 12 12" refX="10.1" refY="6" markerWidth="5.8" markerHeight="5.8" orient="auto-start-reverse">
+                  <path d="M 1 1 L 11 6 L 1 11 z" fill="url(#replenishment-arrow-grad)" stroke="#1e3a8a" strokeWidth="0.55" />
+                  <path d="M 2.2 2.8 L 8.8 6 L 2.2 9.2" fill="none" stroke="rgba(255,255,255,0.38)" strokeWidth="0.55" />
+                </marker>
+                <marker id="replenishment-arrow-confirmed" viewBox="0 0 12 12" refX="10.1" refY="6" markerWidth="5.8" markerHeight="5.8" orient="auto-start-reverse">
+                  <path d="M 1 1 L 11 6 L 1 11 z" fill="#16a34a" stroke="#14532d" strokeWidth="0.55" />
+                </marker>
               </defs>
 
               <image href="/shopfloor-map.png" x="0" y="0" width={SHOPFLOOR_SIZE.width} height={SHOPFLOOR_SIZE.height} preserveAspectRatio="none" />
@@ -2415,7 +2867,7 @@ export default function App() {
                 const kpi = dashboard.zones.find((z) => z.zoneId === zone.id);
                 const selected = selectedZone !== "all" && zone.id === selectedZone;
                 const hovered = hoverZoneId === zone.id;
-                const low = (kpi?.lowStockCount ?? 0) > 0;
+                const low = (kpi?.lowStockCount ?? 0) > 0 || (kpi?.openTaskCount ?? 0) > 0;
                 const zoneInventory = kpi?.inventory ?? [];
                 const hoverRfidQty = zoneInventory
                   .filter((item) => item.source === "RFID")
@@ -2487,6 +2939,49 @@ export default function App() {
                 );
               }) : null}
 
+              {activeCustomerMapMarkers.map((marker) => (
+                <g key={`cart-marker-${marker.id}`} className="customer-cart-marker customer-cart-marker--active">
+                  <circle className="customer-cart-glow" cx={marker.x} cy={marker.y} r="22" />
+                  <circle className="customer-cart-head" cx={marker.x} cy={marker.y - 8} r="5.5" />
+                  <path
+                    className="customer-cart-body"
+                    d={`M ${marker.x - 8} ${marker.y + 8} Q ${marker.x} ${marker.y - 1} ${marker.x + 8} ${marker.y + 8}`}
+                  />
+                  <path
+                    className="customer-cart-basket"
+                    d={`M ${marker.x + 10} ${marker.y + 2} L ${marker.x + 17} ${marker.y + 2} L ${marker.x + 15} ${marker.y + 9} L ${marker.x + 11} ${marker.y + 9} Z`}
+                  />
+                </g>
+              ))}
+
+              {showFinalCartBadge ? (
+                <g className="customer-cart-badge customer-cart-badge--final">
+                  <circle cx={cashierCenter.x + 21} cy={cashierCenter.y - 22} r="10" />
+                  <text x={cashierCenter.x + 21} y={cashierCenter.y - 18}>
+                    {activeCustomerMapMarkers[0]?.cartsCount ?? 0}
+                  </text>
+                </g>
+              ) : null}
+
+              {exitingCustomerMapMarkers.map((marker) => (
+                <g
+                  key={`cart-exit-marker-${marker.id}`}
+                  className="customer-cart-marker customer-cart-marker--exit"
+                  style={{ opacity: marker.opacity }}
+                >
+                  <circle className="customer-cart-glow" cx={marker.x} cy={marker.y} r="20" />
+                  <circle className="customer-cart-head" cx={marker.x} cy={marker.y - 8} r="5.5" />
+                  <path
+                    className="customer-cart-body"
+                    d={`M ${marker.x - 8} ${marker.y + 8} Q ${marker.x} ${marker.y - 1} ${marker.x + 8} ${marker.y + 8}`}
+                  />
+                  <path
+                    className="customer-cart-basket"
+                    d={`M ${marker.x + 10} ${marker.y + 2} L ${marker.x + 17} ${marker.y + 2} L ${marker.x + 15} ${marker.y + 9} L ${marker.x + 11} ${marker.y + 9} Z`}
+                  />
+                </g>
+              ))}
+
               {createMode && newZonePolygon.length > 1 ? (
                 <g className="map-zone-group">
                   <polygon
@@ -2547,6 +3042,96 @@ export default function App() {
                     </g>
                   ))
                 : null}
+
+              {replenishmentFlowMarkers.map((flow) => (
+                <g key={`replenish-flow-${flow.id}`} className="replenishment-flow" style={{ opacity: flow.opacity }}>
+                  {flow.status === "confirmed" ? (
+                    <>
+                      <path d={flow.path} className="replenishment-flow-line-volume" />
+                      <path
+                        d={flow.path}
+                        className="replenishment-flow-line replenishment-flow-line--confirmed"
+                        markerEnd="url(#replenishment-arrow-confirmed)"
+                      />
+                      <path
+                        d={flow.path}
+                        className="replenishment-flow-line-gloss replenishment-flow-line-gloss--confirmed"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      {(() => {
+                        const headT = flow.progress;
+                        const trailLen = flow.status === "moving" ? 0.26 : 0.2;
+                        const fadeLen = flow.status === "moving" ? 0.16 : 0.12;
+                        const trailStartT = Math.max(0, headT - trailLen);
+                        const fadeStartT = Math.max(0, trailStartT - fadeLen);
+                        const fadePath = buildQuadraticSegmentPath(flow.x1, flow.y1, flow.cx, flow.cy, flow.x2, flow.y2, fadeStartT, trailStartT);
+                        const trailPath = buildQuadraticSegmentPath(flow.x1, flow.y1, flow.cx, flow.cy, flow.x2, flow.y2, trailStartT, headT);
+                        return (
+                          <>
+                            {fadePath ? (
+                              <path
+                                d={fadePath}
+                                className={
+                                  flow.status === "moving"
+                                    ? "replenishment-flow-trail-fade replenishment-flow-trail-fade--moving"
+                                    : "replenishment-flow-trail-fade replenishment-flow-trail-fade--pending"
+                                }
+                              />
+                            ) : null}
+                            {trailPath ? (
+                              <path
+                                d={trailPath}
+                                className={
+                                  flow.status === "moving"
+                                    ? "replenishment-flow-trail replenishment-flow-trail--moving"
+                                    : "replenishment-flow-trail replenishment-flow-trail--pending"
+                                }
+                              />
+                            ) : null}
+                          </>
+                        );
+                      })()}
+                    </>
+                  )}
+                  {flow.status !== "confirmed" ? (() => {
+                    const t = flow.progress;
+                    const px =
+                      (1 - t) * (1 - t) * flow.x1 +
+                      2 * (1 - t) * t * flow.cx +
+                      t * t * flow.x2;
+                    const py =
+                      (1 - t) * (1 - t) * flow.y1 +
+                      2 * (1 - t) * t * flow.cy +
+                      t * t * flow.y2;
+                    const tx = 2 * (1 - t) * (flow.cx - flow.x1) + 2 * t * (flow.x2 - flow.cx);
+                    const ty = 2 * (1 - t) * (flow.cy - flow.y1) + 2 * t * (flow.y2 - flow.cy);
+                    const norm = Math.max(0.0001, Math.hypot(tx, ty));
+                    const ux = tx / norm;
+                    const uy = ty / norm;
+                    const nx = -uy;
+                    const ny = ux;
+                    const tipX = px + ux * 10;
+                    const tipY = py + uy * 10;
+                    const leftX = px - ux * 3 + nx * 4.8;
+                    const leftY = py - uy * 3 + ny * 4.8;
+                    const rightX = px - ux * 3 - nx * 4.8;
+                    const rightY = py - uy * 3 - ny * 4.8;
+                    const arrowPoints = `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`;
+                    return (
+                      <polygon
+                        className={
+                          flow.status === "moving"
+                            ? "replenishment-flow-arrow-live replenishment-flow-arrow-live--moving"
+                            : "replenishment-flow-arrow-live replenishment-flow-arrow-live--pending"
+                        }
+                        points={arrowPoints}
+                      />
+                    );
+                  })() : null}
+                </g>
+              ))}
             </svg>
             </div>
           </article>
@@ -3113,7 +3698,17 @@ export default function App() {
                           type={row.type} · location={row.locationName} · source={row.sourceLabel} · qty={row.qtyLabel}
                         </small>
                         <small>
-                          assigned={row.assignedStaffId ?? t(lang, "pendingAssignment")} · status={row.status} · {row.createdAt}
+                          assigned={row.assignedStaffId ?? t(lang, "pendingAssignment")} · status={
+                            row.type === "REPLENISHMENT"
+                              ? row.status === "CREATED" || row.status === "ASSIGNED"
+                                ? t(lang, "replenishmentPendingAcceptance")
+                                : row.status === "IN_PROGRESS"
+                                  ? t(lang, "replenishmentInProgress")
+                                  : row.status === "CONFIRMED"
+                                    ? t(lang, "replenishmentFinished")
+                                    : taskStatusLabelById.get(row.status) ?? row.status
+                              : taskStatusLabelById.get(row.status) ?? row.status
+                          } · {row.createdAt}
                         </small>
                       </div>
                       {row.type === "RECEIVING" && row.status === "IN_TRANSIT" ? (
@@ -3778,9 +4373,10 @@ export default function App() {
                               ))}
                             </select>
                           </label>
-                          {task.status === "ASSIGNED" ? (
+                          {task.status === "ASSIGNED" || task.status === "CREATED" ? (
                             <button
                               className="inline-btn"
+                              disabled={!task.assignedStaffId && activeStaff.length === 0}
                               onClick={() =>
                                 startTask(
                                   task.id,
@@ -3788,7 +4384,7 @@ export default function App() {
                                 )
                               }
                             >
-                              {t(lang, "start")}
+                              {t(lang, "accept")}
                             </button>
                           ) : null}
                           <button
@@ -3809,7 +4405,7 @@ export default function App() {
                               )
                             }
                           >
-                            {t(lang, "confirm")}
+                            {t(lang, "finish")}
                           </button>
                         </div>
                       </div>
@@ -3913,14 +4509,6 @@ export default function App() {
         <div className="control-group">
           <div className="form-grid">
             <label>
-              {t(lang, "customer")}
-              <select value={selectedCustomerId} onChange={(e) => setSelectedCustomerId(e.target.value)}>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>{customer.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
               {t(lang, "zoneLabel")}
               <select value={saleZoneId} onChange={(e) => setSaleZoneId(e.target.value as InventoryZoneId)}>
                 {salesEnabledLocations.map((zone) => (
@@ -3958,24 +4546,37 @@ export default function App() {
               />
             </label>
           </div>
-          <button className="action-btn" disabled={!canAddToCart} onClick={createPosSale}>{t(lang, "addItemToCart")}</button>
+          <button className="action-btn" disabled={!canAddToCart} onClick={() => createPosSale(false)}>
+            {selectedCustomerId ? t(lang, "addItemToCart") : t(lang, "createCartAndAddItem")}
+          </button>
+          {selectedCustomerId ? (
+            <button className="inline-btn" disabled={!canAddToCart} onClick={() => createPosSale(true)}>
+              {t(lang, "createAnotherCart")}
+            </button>
+          ) : null}
           {salesStatusMessage ? <p className="drawer-subtitle">{salesStatusMessage}</p> : null}
         </div>
-        <div className="control-group">
-          <div className="inventory-available-item">
-            <div>
-              <strong>{customers.find((customer) => customer.id === selectedCustomerId)?.name ?? selectedCustomerId}</strong>
-              <small>{customerBasket.length} {t(lang, "items")}</small>
+        <details className="drawer-accordion" open>
+          <summary>{t(lang, "customerItemsInCart")}</summary>
+          <div className="sales-cart-items-head">
+            <div className="sales-cart-items-head-main">
+              <strong>{t(lang, "activeCart")}: {customers.find((entry) => entry.id === selectedCustomerId)?.name ?? t(lang, "autoCartPending")}</strong>
+              <small>
+                {selectedCustomerId
+                  ? `${t(lang, "customer")}: ${selectedCustomerId} · ${customerBasket.length} ${t(lang, "items")}`
+                  : t(lang, "autoCartPendingDetail")}
+              </small>
             </div>
-            <div className="staff-item-actions">
-              <button className="action-btn" disabled={customerBasket.length === 0} onClick={() => checkoutCustomer(selectedCustomerId)}>
+            <div className="sales-cart-items-head-actions">
+              <button
+                className="action-btn"
+                disabled={!selectedCustomerId || customerBasket.length === 0}
+                onClick={() => checkoutCustomer(selectedCustomerId)}
+              >
                 {t(lang, "checkoutCustomer")}
               </button>
             </div>
           </div>
-        </div>
-        <details className="drawer-accordion" open>
-          <summary>{t(lang, "customerItemsInCart")}</summary>
           <div className="inventory-available-list">
             {customerBasket.length === 0 ? (
               <p className="empty">{t(lang, "noItemsInCart")}</p>
@@ -4024,6 +4625,9 @@ export default function App() {
                         })
                         .join(" | ")}
                     </small>
+                    <button className="inline-btn" onClick={() => setSelectedCustomerId(entry.customerId)}>
+                      {t(lang, "useCart")}
+                    </button>
                     <button className="inline-btn" onClick={() => checkoutCustomer(entry.customerId)}>
                       {t(lang, "checkoutCustomer")}
                     </button>
