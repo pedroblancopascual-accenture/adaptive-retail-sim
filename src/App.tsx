@@ -3043,7 +3043,7 @@ export default function App() {
                   ))
                 : null}
 
-              {replenishmentFlowMarkers.map((flow) => (
+              {showMapZones ? replenishmentFlowMarkers.map((flow) => (
                 <g key={`replenish-flow-${flow.id}`} className="replenishment-flow" style={{ opacity: flow.opacity }}>
                   {flow.status === "confirmed" ? (
                     <>
@@ -3131,7 +3131,7 @@ export default function App() {
                     );
                   })() : null}
                 </g>
-              ))}
+              )) : null}
             </svg>
             </div>
           </article>
