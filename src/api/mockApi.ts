@@ -75,6 +75,15 @@ export interface MinMaxRuleTemplate {
 
 const flowEvents: FlowEvent[] = [];
 const LOCATIONS_SETUP_STORAGE_KEY = "adaptive-sim:locations-setup:v1";
+const PRINTING_WALL_ZONE_ID = "zone-printing-wall";
+const CASHIER_STORAGE_ZONE_ID = "zone-cashier-storage";
+const LEGACY_PRINTING_WALL_ZONE_ID = "zone-printing-wall-access";
+const CASHIER_STORAGE_CANONICAL_POLYGON: Array<{ x: number; y: number }> = [
+  { x: 952.100147275405, y: 861.1979336423905 },
+  { x: 1384.3740795287188, y: 859.2052790215655 },
+  { x: 1382.6288659793815, y: 929.5093152223787 },
+  { x: 950.5802650957291, y: 928.5814716073604 }
+];
 const DEFAULT_EXTERNAL_RECEIVING_LOCATIONS: Array<{ id: string; name: string }> = [
   { id: "external-esbo", name: "External Warehouse" }
 ];
@@ -131,11 +140,87 @@ function saveLocationsSetup(locations: Zone[]): void {
   window.localStorage.setItem(LOCATIONS_SETUP_STORAGE_KEY, JSON.stringify(normalized));
 }
 
+function dedupeById(zones: Zone[]): Zone[] {
+  const seen = new Set<string>();
+  const output: Zone[] = [];
+  for (const zone of zones) {
+    if (seen.has(zone.id)) continue;
+    seen.add(zone.id);
+    output.push(zone);
+  }
+  return output;
+}
+
+function ensureSingleZoneByName(zones: Zone[], targetName: string, preferredId: string): Zone[] {
+  const normalizedName = targetName.trim().toUpperCase();
+  const matches = zones.filter((zone) => zone.name.trim().toUpperCase() === normalizedName);
+  if (matches.length <= 1) return zones;
+
+  const canonicalKey = JSON.stringify(CASHIER_STORAGE_CANONICAL_POLYGON);
+  const keeper =
+    (targetName.trim().toUpperCase() === "CASHIER STORAGE"
+      ? matches.find((zone) => JSON.stringify(zone.mapPolygon) === canonicalKey)
+      : undefined) ??
+    matches.find((zone) => zone.id === preferredId) ??
+    matches[0];
+  let kept = false;
+  return zones.filter((zone) => {
+    if (zone.name.trim().toUpperCase() !== normalizedName) return true;
+    if (!kept && zone.id === keeper.id) {
+      kept = true;
+      return true;
+    }
+    return false;
+  });
+}
+
+function sanitizeOperationalZones(zones: Zone[]): Zone[] {
+  let next = dedupeById(zones);
+
+  // Migrate legacy id if still present.
+  const hasCurrentPrintingWall = next.some((zone) => zone.id === PRINTING_WALL_ZONE_ID);
+  if (!hasCurrentPrintingWall) {
+    const legacy = next.find((zone) => zone.id === LEGACY_PRINTING_WALL_ZONE_ID);
+    if (legacy) {
+      legacy.id = PRINTING_WALL_ZONE_ID;
+      legacy.name = "PRINTING WALL";
+    }
+  }
+  next = dedupeById(next);
+
+  next = ensureSingleZoneByName(next, "CASHIER STORAGE", CASHIER_STORAGE_ZONE_ID);
+  next = ensureSingleZoneByName(next, "PRINTING WALL", PRINTING_WALL_ZONE_ID);
+
+  // Enforce mock constraint: sales zones MEN/WOMEN/KIDS source only from Warehouse.
+  const salesWarehouseOnly = new Set(["zone-shelf-a", "zone-shelf-b", "zone-mlhrerbe"]);
+  next = next.map((zone) => {
+    if (!salesWarehouseOnly.has(zone.id)) return zone;
+    return {
+      ...zone,
+      replenishmentSources: [{ sourceZoneId: "zone-warehouse", sortOrder: 1 }]
+    };
+  });
+  return next;
+}
+
 const bootDataset = cloneDatasetFromSample();
 const persistedLocations = loadPersistedLocations();
 if (persistedLocations && persistedLocations.length > 0) {
-  bootDataset.zones = normalizeLocationsAntennaIds(persistedLocations, bootDataset.antennas);
+  bootDataset.zones = normalizeLocationsAntennaIds(sanitizeOperationalZones(persistedLocations), bootDataset.antennas);
 }
+if (!bootDataset.zones.some((zone) => zone.id === CASHIER_STORAGE_ZONE_ID)) {
+  const defaultCashierStorage = sampleDataset.zones.find((zone) => zone.id === CASHIER_STORAGE_ZONE_ID);
+  if (defaultCashierStorage) {
+    bootDataset.zones.push(JSON.parse(JSON.stringify(defaultCashierStorage)));
+  }
+}
+if (!bootDataset.zones.some((zone) => zone.id === PRINTING_WALL_ZONE_ID)) {
+  const defaultPrintingWall = sampleDataset.zones.find((zone) => zone.id === PRINTING_WALL_ZONE_ID);
+  if (defaultPrintingWall) {
+    bootDataset.zones.push(JSON.parse(JSON.stringify(defaultPrintingWall)));
+  }
+}
+bootDataset.zones = sanitizeOperationalZones(bootDataset.zones);
 
 const engine = new InventoryEngine(bootDataset);
 engine.loadDemoStream(bootDataset.rfidReadEvents, bootDataset.salesEvents);

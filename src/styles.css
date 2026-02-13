@@ -863,6 +863,45 @@ h1 {
   padding: 0 4px 8px;
 }
 
+.view-breadcrumbs {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  gap: 10px;
+  margin: -2px 4px 12px;
+  padding: 8px 14px;
+  border: 1px solid rgba(182, 201, 226, 0.78);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #5b6d86;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.crumb-home {
+  border: none;
+  background: transparent;
+  color: #2563eb;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+
+.crumb-home:hover {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+
+.crumb-sep {
+  color: #7f90aa;
+  font-weight: 700;
+}
+
+.crumb-current {
+  color: #334155;
+}
+
 @media (max-width: 1120px) {
   .layout-grid {
     grid-template-columns: 1fr;

@@ -122,6 +122,40 @@ export const sampleDataset: SampleDataset = {
       createdAt: "2026-02-10T09:00:00Z"
     },
     {
+      id: "zone-cashier-storage",
+      name: "CASHIER STORAGE",
+      color: "#8b5cf6",
+      mapPolygon: [
+        { x: 952.100147275405, y: 861.1979336423905 },
+        { x: 1384.3740795287188, y: 859.2052790215655 },
+        { x: 1382.6288659793815, y: 929.5093152223787 },
+        { x: 950.5802650957291, y: 928.5814716073604 }
+      ],
+      antennaIds: ["ant-cashier-storage-1"],
+      ruleIds: [],
+      isSalesLocation: false,
+      replenishmentSources: [],
+      isActive: true,
+      createdAt: "2026-02-10T09:00:00Z"
+    },
+    {
+      id: "zone-printing-wall",
+      name: "PRINTING WALL",
+      color: "#facc15",
+      mapPolygon: [
+        { x: 953.0, y: 1010.0 },
+        { x: 1384.0, y: 1010.0 },
+        { x: 1384.0, y: 1090.0 },
+        { x: 953.0, y: 1090.0 }
+      ],
+      antennaIds: ["ant-printing-wall-1"],
+      ruleIds: [],
+      isSalesLocation: false,
+      replenishmentSources: [{ sourceZoneId: "zone-cashier-storage", sortOrder: 1 }],
+      isActive: true,
+      createdAt: "2026-02-10T09:00:00Z"
+    },
+    {
       id: "zone-fitting-rooms",
       name: "Fitting Rooms",
       color: "#6366f1",
@@ -197,6 +231,8 @@ export const sampleDataset: SampleDataset = {
     { id: "ant-kids-1", zoneId: "zone-shelf-b", name: "KIDS-1", x: 930, y: 330, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
     { id: "ant-warehouse-1", zoneId: "zone-warehouse", name: "WH-1", x: 1298, y: 190, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
     { id: "ant-cashier-1", zoneId: "zone-cashier", name: "CS-1", x: 1165, y: 835, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
+    { id: "ant-cashier-storage-1", zoneId: "zone-cashier-storage", name: "CSS-1", x: 1185, y: 970, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
+    { id: "ant-printing-wall-1", zoneId: "zone-printing-wall", name: "PWA-1", x: 1185, y: 1050, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
     { id: "ant-fitting-1", zoneId: "zone-fitting-rooms", name: "FIT-1", x: 315, y: 860, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
     { id: "ant-entrance-1", zoneId: "zone-entrance", name: "ENT-1", x: 770, y: 1068, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
     { id: "ant-aisle-east-1", zoneId: "zone-aisle-east", name: "AIE-1", x: 1210, y: 520, isActive: true, createdAt: "2026-02-10T09:00:00Z" },
@@ -588,9 +624,7 @@ export const sampleDataset: SampleDataset = {
     { id: "rr5", epc: "EPC-0005", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:09Z", rssi: -56.3, ingestedAt: "2026-02-10T10:00:09Z" },
     { id: "rr6", epc: "EPC-0006", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:10Z", rssi: -56.1, ingestedAt: "2026-02-10T10:00:10Z" },
     { id: "rr7", epc: "EPC-0007", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:11Z", rssi: -56.0, ingestedAt: "2026-02-10T10:00:11Z" },
-    { id: "rr8", epc: "EPC-0008", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:12Z", rssi: -58.7, ingestedAt: "2026-02-10T10:00:12Z" },
-    { id: "rr9", epc: "EPC-0009", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:13Z", rssi: -57.0, ingestedAt: "2026-02-10T10:00:13Z" },
-    { id: "rr10", epc: "EPC-0010", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:14Z", rssi: -56.9, ingestedAt: "2026-02-10T10:00:14Z" },
+    { id: "rr8", epc: "EPC-0008", antennaId: "ant-men-1", zoneId: "zone-mlhrerbe", timestamp: "2026-02-10T10:00:12Z", rssi: -58.7, ingestedAt: "2026-02-10T10:00:12Z" },
     { id: "rr11", epc: "EPC-0011", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:15Z", rssi: -55.9, ingestedAt: "2026-02-10T10:00:15Z" },
     { id: "rr12", epc: "EPC-0012", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:16Z", rssi: -55.6, ingestedAt: "2026-02-10T10:00:16Z" },
     { id: "rr13", epc: "EPC-0013", antennaId: "ant-warehouse-1", zoneId: "zone-warehouse", timestamp: "2026-02-10T10:00:17Z", rssi: -55.1, ingestedAt: "2026-02-10T10:00:17Z" },

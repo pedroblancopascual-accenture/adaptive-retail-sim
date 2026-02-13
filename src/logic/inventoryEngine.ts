@@ -74,6 +74,9 @@ function taskIsOpen(status: TaskStatus): boolean {
   return status === "CREATED" || status === "ASSIGNED" || status === "IN_PROGRESS";
 }
 
+const CASHIER_STORAGE_ZONE_ID = "zone-cashier-storage";
+const PRINTING_WALL_ZONE_ID = "zone-printing-wall";
+
 interface TransferResult {
   movedQty: number;
   movedEpcs: string[];
@@ -103,6 +106,7 @@ export class InventoryEngine {
   private taskAudit: TaskAuditEntry[];
   private nowCursor: string;
   private generatedEpcSeq: number;
+  private personalizableSkuIds: Set<string>;
 
   constructor(dataset: SampleDataset) {
     this.zones = dataset.zones;
@@ -132,7 +136,17 @@ export class InventoryEngine {
     this.taskAudit = [];
     this.nowCursor = "2026-02-10T10:00:00Z";
     this.generatedEpcSeq = dataset.epcSkuMapping.length + 1;
-
+    this.personalizableSkuIds = new Set(
+      dataset.catalogProducts.flatMap((product) =>
+        product.variants
+          .filter((variant) => {
+            const role = variant.role;
+            if (role === "player" || role === "goalkeeper") return true;
+            return product.title.toUpperCase().includes("JSY");
+          })
+          .map((variant) => variant.skuId)
+      )
+    );
   }
 
   seedDemoEvents(): void {
@@ -575,7 +589,9 @@ export class InventoryEngine {
 
     for (const item of items) {
       const source = this.skuSourceById.get(item.skuId) ?? "NON_RFID";
-      if (source === "NON_RFID") {
+      if (this.personalizableSkuIds.has(item.skuId)) {
+        this.processPersonalizationSale(item, source, timestamp);
+      } else if (source === "NON_RFID") {
         this.ingestSalesEvent({
           id: `sale-${Date.now()}-${soldItems + 1}`,
           skuId: item.skuId,
@@ -592,9 +608,12 @@ export class InventoryEngine {
           this.deductRFIDImmediate(item.zoneId, item.skuId, outstanding);
         }
       }
+
       item.status = "SOLD";
       soldItems += 1;
       affectedZones.add(item.zoneId);
+      affectedZones.add(CASHIER_STORAGE_ZONE_ID);
+      affectedZones.add(PRINTING_WALL_ZONE_ID);
     }
 
     for (const pending of this.pendingRFIDPicks) {
@@ -1289,6 +1308,198 @@ export class InventoryEngine {
       .map((entry) => entry.epc);
   }
 
+  private processPersonalizationSale(
+    item: CustomerBasketItem,
+    source: InventorySource,
+    timestamp: string
+  ): void {
+    const cashierStorage = this.zones.find((zone) => zone.id === CASHIER_STORAGE_ZONE_ID);
+    const originZone = this.zones.find((zone) => zone.id === item.zoneId);
+    if (!cashierStorage || !originZone) return;
+
+    if (source === "RFID") {
+      const pickedFromReads = Math.max(0, item.pickedConfirmedQty);
+      const restoredFromPending = this.transferConsumedPendingEpcsToZone(
+        item.id,
+        item.skuId,
+        CASHIER_STORAGE_ZONE_ID,
+        timestamp
+      );
+
+      // If consumed EPCs are not present in pending picks anymore, recreate them in cashier storage
+      // so task source availability reflects physical item flow after checkout.
+      if (pickedFromReads > restoredFromPending) {
+        this.createExternalRFIDForDestination(
+          item.skuId,
+          CASHIER_STORAGE_ZONE_ID,
+          pickedFromReads - restoredFromPending,
+          timestamp
+        );
+      }
+
+      const outstanding = Math.max(0, item.qty - pickedFromReads);
+      if (outstanding > 0) {
+        this.moveRFIDEpcs(item.zoneId, CASHIER_STORAGE_ZONE_ID, item.skuId, outstanding, timestamp);
+      }
+      item.pickedConfirmedQty = 0;
+    } else {
+      const movedQty = this.transferNonRfid(item.zoneId, CASHIER_STORAGE_ZONE_ID, item.skuId, item.qty);
+      if (movedQty <= 0) return;
+    }
+
+    // Refresh snapshots before calculating "last unit" and source candidates.
+    this.calculateZoneInventory(item.zoneId);
+    this.calculateZoneInventory(CASHIER_STORAGE_ZONE_ID);
+
+    const sourceZone = this.zones.find((zone) => zone.id === item.zoneId);
+    if (!sourceZone) return;
+    const projectedSupply = this.getProjectedSupplyForOrigin(sourceZone, item.skuId, source);
+    const isLastUnit = projectedSupply <= 0;
+    const destinationZoneId = isLastUnit ? PRINTING_WALL_ZONE_ID : item.zoneId;
+    this.createPersonalizationTask(destinationZoneId, item.skuId, item.qty, source, projectedSupply);
+  }
+
+  private transferConsumedPendingEpcsToZone(
+    basketItemId: string,
+    skuId: string,
+    destinationZoneId: string,
+    at: string
+  ): number {
+    const destinationAntenna =
+      this.antennas.find((antenna) => antenna.zoneId === destinationZoneId)?.id ?? "system-transfer";
+    let moved = 0;
+    for (const pending of this.pendingRFIDPicks) {
+      if (pending.basketItemId !== basketItemId) continue;
+      for (const epc of pending.consumedEpcs) {
+        this.epcPresence.set(epc, {
+          epc,
+          skuId,
+          zoneId: destinationZoneId,
+          antennaId: destinationAntenna,
+          lastSeenAt: at
+        });
+        moved += 1;
+      }
+      pending.consumedEpcs = [];
+      pending.qtyRemaining = 0;
+      pending.status = "COMPLETED";
+    }
+    return moved;
+  }
+
+  private transferNonRfid(
+    sourceZoneId: string,
+    destinationZoneId: string,
+    skuId: string,
+    qty: number
+  ): number {
+    const currentSource = this.getCurrentInventoryQty(sourceZoneId, skuId, "NON_RFID");
+    const movedQty = Math.min(Math.max(0, qty), currentSource);
+    if (movedQty <= 0) return 0;
+    this.upsertSnapshot(sourceZoneId, skuId, currentSource - movedQty, "NON_RFID");
+    const currentDestination = this.getCurrentInventoryQty(destinationZoneId, skuId, "NON_RFID");
+    this.upsertSnapshot(destinationZoneId, skuId, currentDestination + movedQty, "NON_RFID");
+    return movedQty;
+  }
+
+  private createPersonalizationTask(
+    destinationZoneId: string,
+    skuId: string,
+    qty: number,
+    source: InventorySource,
+    projectedSupply: number
+  ): void {
+    const normalizedQty = Math.max(1, Math.floor(qty));
+    const sourceCandidates = this.buildManualSourceCandidates(
+      destinationZoneId,
+      skuId,
+      source,
+      CASHIER_STORAGE_ZONE_ID
+    );
+    const selectedSource =
+      sourceCandidates.find((candidate) => candidate.availableQty > 0)?.sourceZoneId ??
+      sourceCandidates[0]?.sourceZoneId ??
+      CASHIER_STORAGE_ZONE_ID;
+    const currentDestinationQty = this.getCurrentInventoryQty(destinationZoneId, skuId, source);
+
+    const task: ReplenishmentTask = {
+      id: `task-${this.tasks.length + 1}`,
+      ruleId: `rule-printing-sale-${destinationZoneId}-${skuId}`.toLowerCase(),
+      zoneId: destinationZoneId,
+      skuId,
+      sourceZoneId: selectedSource,
+      sourceCandidates,
+      status: "CREATED",
+      triggerQty: currentDestinationQty,
+      deficitQty: normalizedQty,
+      targetQty: currentDestinationQty + normalizedQty,
+      createdAt: this.nowCursor,
+      updatedAt: this.nowCursor
+    };
+    this.tasks.push(task);
+    this.pushTaskAudit(
+      task.id,
+      "CREATED",
+      undefined,
+      `sale_personalization source=${CASHIER_STORAGE_ZONE_ID} destination=${destinationZoneId} qty=${normalizedQty} projected_supply=${projectedSupply}`
+    );
+    this.autoAssignPendingTasks(this.nowCursor);
+  }
+
+  private getProjectedSupplyForOrigin(zone: Zone, skuId: string, source: InventorySource): number {
+    const currentInOrigin = this.getCurrentInventoryQty(zone.id, skuId, source);
+    const openInboundQty = this.tasks
+      .filter((task) => task.zoneId === zone.id && task.skuId === skuId && taskIsOpen(task.status))
+      .reduce((sum, task) => sum + Math.max(0, task.deficitQty), 0);
+    const sourcePotentialQty = [...zone.replenishmentSources]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .reduce((sum, sourceRef) => {
+        const available = Math.max(
+          0,
+          this.getCurrentInventoryQty(sourceRef.sourceZoneId, skuId, source) -
+            this.getReservedTaskQtyFromSource(sourceRef.sourceZoneId, skuId)
+        );
+        return sum + available;
+      }, 0);
+    return currentInOrigin + openInboundQty + sourcePotentialQty;
+  }
+
+  private buildManualSourceCandidates(
+    destinationZoneId: string,
+    skuId: string,
+    source: InventorySource,
+    preferredSourceZoneId?: string
+  ): Array<{ sourceZoneId: string; sortOrder: number; availableQty: number }> {
+    const candidates: Array<{ sourceZoneId: string; sortOrder: number; availableQty: number }> = [];
+    if (preferredSourceZoneId) {
+      candidates.push({
+        sourceZoneId: preferredSourceZoneId,
+        sortOrder: 1,
+        availableQty: Math.max(
+          0,
+          this.getCurrentInventoryQty(preferredSourceZoneId, skuId, source) -
+            this.getReservedTaskQtyFromSource(preferredSourceZoneId, skuId)
+        )
+      });
+    }
+
+    const destination = this.zones.find((zone) => zone.id === destinationZoneId);
+    if (!destination) return candidates;
+    for (const sourceRef of [...destination.replenishmentSources].sort((a, b) => a.sortOrder - b.sortOrder)) {
+      if (candidates.some((entry) => entry.sourceZoneId === sourceRef.sourceZoneId)) continue;
+      candidates.push({
+        sourceZoneId: sourceRef.sourceZoneId,
+        sortOrder: sourceRef.sortOrder + 1,
+        availableQty: Math.max(
+          0,
+          this.getCurrentInventoryQty(sourceRef.sourceZoneId, skuId, source) -
+            this.getReservedTaskQtyFromSource(sourceRef.sourceZoneId, skuId)
+        )
+      });
+    }
+    return candidates;
+  }
+
   private buildSourceCandidates(
     rule: ReplenishmentRule,
     excludeTaskId?: string
@@ -1543,6 +1754,12 @@ export class InventoryEngine {
     confidence?: number
   ): void {
     const existing = this.snapshots.find((s) => s.zoneId === zoneId && s.skuId === skuId && s.source === source);
+    if (zoneId === CASHIER_STORAGE_ZONE_ID && qty <= 0) {
+      if (existing) {
+        this.snapshots = this.snapshots.filter((s) => s !== existing);
+      }
+      return;
+    }
     if (!existing) {
       this.snapshots.push({
         id: `snap-${zoneId}-${skuId}-${source}`,

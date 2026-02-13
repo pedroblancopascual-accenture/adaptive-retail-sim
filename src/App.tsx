@@ -373,6 +373,14 @@ export default function App() {
     () => openTasks.length + pendingReceivingOrders.length,
     [openTasks.length, pendingReceivingOrders.length]
   );
+  const zoneDrawerTaskRows = useMemo(() => {
+    const zoneId = selectedZone === "all" ? null : selectedZone;
+    const replenishmentRows = openTasks.filter((task) => (zoneId ? task.zoneId === zoneId : true));
+    const receivingRows = pendingReceivingOrders.filter((order) =>
+      zoneId ? order.destinationZoneId === zoneId : true
+    );
+    return [...replenishmentRows, ...receivingRows];
+  }, [openTasks, pendingReceivingOrders, selectedZone]);
   const unifiedTaskRows = useMemo(() => {
     const replenRows = tasks.tasks.map((task) => {
       const zoneName = locationNameById.get(task.zoneId) ?? task.zoneId;
@@ -898,6 +906,14 @@ export default function App() {
 
   const activeStaff = useMemo(() => staff.filter((member) => member.activeShift), [staff]);
   const zoneOrder = useMemo(() => locations.map((zone) => zone.id as InventoryZoneId), [locations]);
+  const hasMinMaxRulesByZone = useMemo(() => {
+    const byZone = new Map<string, boolean>();
+    for (const rule of rules) {
+      if (!rule.isActive) continue;
+      byZone.set(rule.zoneId, true);
+    }
+    return byZone;
+  }, [rules]);
   const analyticsData = useMemo(() => {
     const allTasks = tasks.tasks;
     const statusCounts: Record<"CREATED" | "ASSIGNED" | "IN_PROGRESS" | "CONFIRMED" | "REJECTED", number> = {
@@ -2560,6 +2576,19 @@ export default function App() {
     );
   }
 
+  const breadcrumbSectionLabel =
+    mainContentView === "staff"
+      ? t(lang, "staff")
+      : mainContentView === "catalog"
+        ? t(lang, "catalog")
+        : mainContentView === "rules"
+          ? t(lang, "rules")
+          : mainContentView === "tasks"
+            ? t(lang, "tasks")
+            : mainContentView === "analytics"
+              ? t(lang, "analytics")
+              : null;
+
   return (
     <main className="page-shell">
       <header className="hero">
@@ -2646,6 +2675,17 @@ export default function App() {
       <p className="footer-note">
         <span>{t(lang, "legalDisclaimer")}</span>
       </p>
+      {breadcrumbSectionLabel ? (
+        <nav className="view-breadcrumbs" aria-label="Breadcrumb">
+          <button type="button" className="crumb-home" onClick={openMapMainView}>
+            {t(lang, "home")}
+          </button>
+          <span className="crumb-sep" aria-hidden="true">
+            {">"}
+          </span>
+          <span className="crumb-current">{breadcrumbSectionLabel}</span>
+        </nav>
+      ) : null}
 
       <section className="kpi-grid">
         <article className="kpi-card"><span>{t(lang, "zones")}</span><strong>{totals.zones}</strong></article>
@@ -2678,7 +2718,10 @@ export default function App() {
                 {zoneOrder.map((zoneId) => {
                   const zoneKpi = dashboard.zones.find((z) => z.zoneId === zoneId);
                   const location = locations.find((entry) => entry.id === zoneId);
-                  const low = (zoneKpi?.lowStockCount ?? 0) > 0 || (zoneKpi?.openTaskCount ?? 0) > 0;
+                  const hasMinMaxRules = hasMinMaxRulesByZone.get(zoneId) ?? false;
+                  const low =
+                    hasMinMaxRules &&
+                    ((zoneKpi?.lowStockCount ?? 0) > 0 || (zoneKpi?.openTaskCount ?? 0) > 0);
                   return (
                   <button
                     key={zoneId}
@@ -2867,7 +2910,10 @@ export default function App() {
                 const kpi = dashboard.zones.find((z) => z.zoneId === zone.id);
                 const selected = selectedZone !== "all" && zone.id === selectedZone;
                 const hovered = hoverZoneId === zone.id;
-                const low = (kpi?.lowStockCount ?? 0) > 0 || (kpi?.openTaskCount ?? 0) > 0;
+                const hasMinMaxRules = hasMinMaxRulesByZone.get(zone.id) ?? false;
+                const low =
+                  hasMinMaxRules &&
+                  ((kpi?.lowStockCount ?? 0) > 0 || (kpi?.openTaskCount ?? 0) > 0);
                 const zoneInventory = kpi?.inventory ?? [];
                 const hoverRfidQty = zoneInventory
                   .filter((item) => item.source === "RFID")
@@ -3139,7 +3185,6 @@ export default function App() {
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "staff")}</h2>
-              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
             </div>
             <div className="inventory-available-list">
               {staff.map((member) => (
@@ -3202,7 +3247,6 @@ export default function App() {
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "catalogTitle")}</h2>
-              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
             </div>
             <p className="drawer-subtitle">{t(lang, "catalogSubtitle")}</p>
             <div className="control-group">
@@ -3457,7 +3501,6 @@ export default function App() {
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "rulesHubTitle")}</h2>
-              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
             </div>
             <p className="drawer-subtitle">{t(lang, "rulesHubSubtitle")}</p>
 
@@ -3557,7 +3600,6 @@ export default function App() {
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "tasks")}</h2>
-              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
             </div>
             <div className="control-group">
               <h4>Task Hub</h4>
@@ -3733,7 +3775,6 @@ export default function App() {
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "analytics")}</h2>
-              <button className="inline-btn" onClick={openMapMainView}>{t(lang, "backToMap")}</button>
             </div>
             <div className="analytics-kpi-grid">
               <article className="analytics-kpi-card">
@@ -4302,26 +4343,14 @@ export default function App() {
 
         {zoneDrawerSection === "tasks" ? (
           <details className="drawer-accordion" open>
-            <summary>
-              {selectedLocation && !selectedLocation.isSalesLocation
-                ? "Receiving tasks in location"
-                : t(lang, "replenishmentTasksInZone")}
-            </summary>
+            <summary>{t(lang, "tasks")}</summary>
             <div className="task-list">
-              {(selectedLocation && !selectedLocation.isSalesLocation
-                ? pendingReceivingOrders.filter((order) => selectedZone === "all" || order.destinationZoneId === selectedZone)
-                : openTasks.filter((task) => selectedZone === "all" || task.zoneId === selectedZone)
-              ).length === 0 ? (
+              {zoneDrawerTaskRows.length === 0 ? (
                 <p className="empty">
-                  {selectedLocation && !selectedLocation.isSalesLocation
-                    ? "No receiving tasks in location."
-                    : (selectedZone === "all" ? t(lang, "noOpenTasks") : t(lang, "noOpenTasksInZone"))}
+                  {selectedZone === "all" ? t(lang, "noOpenTasks") : t(lang, "noOpenTasksInZone")}
                 </p>
               ) : (
-                (selectedLocation && !selectedLocation.isSalesLocation
-                  ? pendingReceivingOrders.filter((order) => selectedZone === "all" || order.destinationZoneId === selectedZone)
-                  : openTasks.filter((task) => selectedZone === "all" || task.zoneId === selectedZone)
-                ).map((task) =>
+                zoneDrawerTaskRows.map((task) =>
                   "destinationZoneId" in task ? (
                     <div key={task.id} className="task-card">
                       <div className="task-card-top">
