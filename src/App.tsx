@@ -21,6 +21,7 @@ type AppDisplayMode = "admin" | "staff";
 type TaskTypeValue = "REPLENISHMENT" | "RECEIVING";
 type TaskStatusValue = "CREATED" | "ASSIGNED" | "IN_PROGRESS" | "IN_TRANSIT" | "CONFIRMED" | "REJECTED";
 type TaskHubFilterKey = "TYPE" | "DESTINATION" | "STATUS";
+type AnalyticsHeatFilterKey = "LOCATION" | "STAFF";
 type CatalogSourceFilterValue = "RFID" | "NON_RFID";
 type CatalogKitValue = "home" | "away" | "third" | "forth";
 type CatalogAgeGroupValue = "adults" | "youth" | "kids" | "baby";
@@ -289,6 +290,10 @@ export default function App() {
   const [taskHubStatusFilters, setTaskHubStatusFilters] = useState<TaskStatusValue[]>([]);
   const [taskHubPendingFilterKey, setTaskHubPendingFilterKey] = useState<TaskHubFilterKey | "">("");
   const [taskHubFilterSearch, setTaskHubFilterSearch] = useState("");
+  const [analyticsHeatLocationFilters, setAnalyticsHeatLocationFilters] = useState<string[]>([]);
+  const [analyticsHeatStaffFilters, setAnalyticsHeatStaffFilters] = useState<string[]>([]);
+  const [analyticsHeatPendingFilterKey, setAnalyticsHeatPendingFilterKey] = useState<AnalyticsHeatFilterKey | "">("");
+  const [analyticsHeatFilterSearch, setAnalyticsHeatFilterSearch] = useState("");
   const [catalogSourceFilters, setCatalogSourceFilters] = useState<CatalogSourceFilterValue[]>([]);
   const [catalogKitFilters, setCatalogKitFilters] = useState<CatalogKitValue[]>([]);
   const [catalogAgeGroupFilters, setCatalogAgeGroupFilters] = useState<CatalogAgeGroupValue[]>([]);
@@ -1270,6 +1275,137 @@ export default function App() {
       topZoneMovement
     };
   }, [staff, tasks.tasks, locations]);
+  const analyticsHeatLocationOptionRows = useMemo(
+    () =>
+      [...locations]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((zone) => ({ id: zone.id, label: zone.name })),
+    [locations]
+  );
+  const analyticsHeatStaffOptionRows = useMemo(
+    () =>
+      [...staff]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((member) => ({ id: member.id, label: member.name })),
+    [staff]
+  );
+  const analyticsHeatAddableFilterKeys = useMemo(() => {
+    const keys: AnalyticsHeatFilterKey[] = [];
+    if (analyticsHeatLocationFilters.length === 0) keys.push("LOCATION");
+    if (analyticsHeatStaffFilters.length === 0) keys.push("STAFF");
+    return keys;
+  }, [analyticsHeatLocationFilters, analyticsHeatStaffFilters]);
+  const analyticsHeatPendingOptions = useMemo(() => {
+    if (!analyticsHeatPendingFilterKey) return [];
+    const sourceRows =
+      analyticsHeatPendingFilterKey === "LOCATION"
+        ? analyticsHeatLocationOptionRows
+        : analyticsHeatStaffOptionRows;
+    const search = analyticsHeatFilterSearch.trim().toLowerCase();
+    if (!search) return sourceRows;
+    return sourceRows.filter((entry) => entry.label.toLowerCase().includes(search));
+  }, [
+    analyticsHeatPendingFilterKey,
+    analyticsHeatLocationOptionRows,
+    analyticsHeatStaffOptionRows,
+    analyticsHeatFilterSearch
+  ]);
+  useEffect(() => {
+    setAnalyticsHeatLocationFilters((prev) => {
+      const validIds = new Set(locations.map((zone) => zone.id));
+      const filtered = prev.filter((id) => validIds.has(id));
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [locations]);
+  useEffect(() => {
+    setAnalyticsHeatStaffFilters((prev) => {
+      const validIds = new Set(staff.map((member) => member.id));
+      const filtered = prev.filter((id) => validIds.has(id));
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [staff]);
+  const analyticsHeatActiveFilters = useMemo(() => {
+    const filters: Array<{ key: AnalyticsHeatFilterKey; label: string; valueLabel: string }> = [];
+    if (analyticsHeatLocationFilters.length > 0) {
+      filters.push({
+        key: "LOCATION",
+        label: t(lang, "analyticsFilterLocation"),
+        valueLabel: analyticsHeatLocationFilters
+          .map((zoneId) => locationNameById.get(zoneId) ?? zoneId)
+          .join(", ")
+      });
+    }
+    if (analyticsHeatStaffFilters.length > 0) {
+      filters.push({
+        key: "STAFF",
+        label: t(lang, "analyticsFilterStaff"),
+        valueLabel: analyticsHeatStaffFilters
+          .map((staffId) => staffNameById.get(staffId) ?? staffId)
+          .join(", ")
+      });
+    }
+    return filters;
+  }, [analyticsHeatLocationFilters, analyticsHeatStaffFilters, lang, locationNameById, staffNameById]);
+  const analyticsHeatZoneIds = useMemo(() => {
+    if (analyticsHeatLocationFilters.length === 0) {
+      return locations.map((zone) => zone.id);
+    }
+    return locations
+      .map((zone) => zone.id)
+      .filter((zoneId) => analyticsHeatLocationFilters.includes(zoneId));
+  }, [analyticsHeatLocationFilters, locations]);
+  const analyticsHeatFilteredTasks = useMemo(
+    () =>
+      tasks.tasks.filter((task) => {
+        if (analyticsHeatLocationFilters.length > 0 && !analyticsHeatLocationFilters.includes(task.zoneId)) return false;
+        if (
+          analyticsHeatStaffFilters.length > 0 &&
+          !analyticsHeatStaffFilters.includes(task.assignedStaffId ?? "") &&
+          !analyticsHeatStaffFilters.includes(task.confirmedBy ?? "")
+        ) {
+          return false;
+        }
+        return true;
+      }),
+    [analyticsHeatLocationFilters, analyticsHeatStaffFilters, tasks.tasks]
+  );
+  const analyticsHeatZoneMovement = useMemo(() => {
+    const movementByZone = new Map<string, { zoneId: string; confirmedQty: number; confirmedTasks: number; openDemandQty: number }>();
+    for (const zoneId of analyticsHeatZoneIds) {
+      movementByZone.set(zoneId, {
+        zoneId,
+        confirmedQty: 0,
+        confirmedTasks: 0,
+        openDemandQty: 0
+      });
+    }
+    for (const task of analyticsHeatFilteredTasks) {
+      const current = movementByZone.get(task.zoneId);
+      if (!current) continue;
+      if (task.closeReason?.startsWith("confirmed")) {
+        current.confirmedQty += Math.max(0, task.confirmedQty ?? 0);
+        current.confirmedTasks += 1;
+      }
+      if (task.status === "CREATED" || task.status === "ASSIGNED" || task.status === "IN_PROGRESS") {
+        current.openDemandQty += Math.max(0, task.deficitQty);
+      }
+    }
+    return [...movementByZone.values()].sort(
+      (a, b) => b.confirmedQty - a.confirmedQty || b.confirmedTasks - a.confirmedTasks
+    );
+  }, [analyticsHeatFilteredTasks, analyticsHeatZoneIds]);
+  const analyticsHeatTopZoneMovement = useMemo(
+    () => analyticsHeatZoneMovement.find((entry) => entry.confirmedQty > 0 || entry.confirmedTasks > 0) ?? null,
+    [analyticsHeatZoneMovement]
+  );
+  const analyticsHeatMaxConfirmedQty = useMemo(
+    () => Math.max(1, ...analyticsHeatZoneMovement.map((entry) => entry.confirmedQty)),
+    [analyticsHeatZoneMovement]
+  );
+  const analyticsHeatVisibleZones = useMemo(
+    () => locations.filter((zone) => analyticsHeatZoneIds.includes(zone.id)),
+    [analyticsHeatZoneIds, locations]
+  );
 
   const selectedZoneUnits = useMemo(() => {
     const rows =
@@ -2542,6 +2678,48 @@ export default function App() {
     setTaskHubFilterSearch("");
   }
 
+  function removeAnalyticsHeatFilter(key: AnalyticsHeatFilterKey): void {
+    if (key === "LOCATION") {
+      setAnalyticsHeatLocationFilters([]);
+      if (analyticsHeatPendingFilterKey === "LOCATION") {
+        setAnalyticsHeatPendingFilterKey("");
+        setAnalyticsHeatFilterSearch("");
+      }
+      return;
+    }
+    setAnalyticsHeatStaffFilters([]);
+    if (analyticsHeatPendingFilterKey === "STAFF") {
+      setAnalyticsHeatPendingFilterKey("");
+      setAnalyticsHeatFilterSearch("");
+    }
+  }
+
+  function clearAnalyticsHeatFilters(): void {
+    setAnalyticsHeatLocationFilters([]);
+    setAnalyticsHeatStaffFilters([]);
+    setAnalyticsHeatPendingFilterKey("");
+    setAnalyticsHeatFilterSearch("");
+  }
+
+  function toggleAnalyticsHeatPendingOption(optionId: string): void {
+    if (!analyticsHeatPendingFilterKey) return;
+    if (analyticsHeatPendingFilterKey === "LOCATION") {
+      setAnalyticsHeatLocationFilters((prev) =>
+        prev.includes(optionId) ? prev.filter((value) => value !== optionId) : [...prev, optionId]
+      );
+      return;
+    }
+    setAnalyticsHeatStaffFilters((prev) =>
+      prev.includes(optionId) ? prev.filter((value) => value !== optionId) : [...prev, optionId]
+    );
+  }
+
+  function isAnalyticsHeatPendingOptionSelected(optionId: string): boolean {
+    if (!analyticsHeatPendingFilterKey) return false;
+    if (analyticsHeatPendingFilterKey === "LOCATION") return analyticsHeatLocationFilters.includes(optionId);
+    return analyticsHeatStaffFilters.includes(optionId);
+  }
+
   function toggleTaskHubPendingOption(optionId: string): void {
     if (!taskHubPendingFilterKey) return;
     if (taskHubPendingFilterKey === "TYPE") {
@@ -2563,9 +2741,6 @@ export default function App() {
           : [...prev, optionId as TaskStatusValue]
       );
     }
-    // Shopify-like UX: once an option is selected, close picker and return CTA to "Add filter"
-    setTaskHubPendingFilterKey("");
-    setTaskHubFilterSearch("");
   }
 
   function isTaskHubPendingOptionSelected(optionId: string): boolean {
@@ -2649,9 +2824,6 @@ export default function App() {
           : [...prev, optionId as CatalogQualityValue]
       );
     }
-    // Shopify-like UX: once an option is selected, close picker and return CTA to "Add filter"
-    setCatalogPendingFilterKey("");
-    setCatalogFilterSearch("");
   }
 
   function isCatalogPendingOptionSelected(optionId: string): boolean {
@@ -4387,6 +4559,137 @@ export default function App() {
 
               <section className="analytics-panel analytics-panel--wide">
                 <h4>{t(lang, "analyticsReplenishmentHeatmap")}</h4>
+                <div className="task-filter-bar analytics-heat-filter-bar">
+                  <div className="task-filter-chip-list">
+                    {analyticsHeatActiveFilters.map((filter) => (
+                      <div key={`analytics-filter-chip-${filter.key}`} className="task-filter-anchor">
+                        <button
+                          type="button"
+                          className="task-filter-chip"
+                          onClick={() => {
+                            setAnalyticsHeatPendingFilterKey(filter.key);
+                            setAnalyticsHeatFilterSearch("");
+                          }}
+                          title="Edit filter"
+                        >
+                          {filter.label}: {filter.valueLabel}
+                          <span
+                            className="task-filter-chip-close-inline"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              removeAnalyticsHeatFilter(filter.key);
+                            }}
+                            aria-hidden="true"
+                            title="Remove filter"
+                          >
+                            ×
+                          </span>
+                        </button>
+                        {analyticsHeatPendingFilterKey === filter.key ? (
+                          <div className="task-filter-picker">
+                            <input
+                              className="task-filter-search"
+                              placeholder={t(lang, "taskFilterSearchPlaceholder")}
+                              value={analyticsHeatFilterSearch}
+                              onChange={(e) => setAnalyticsHeatFilterSearch(e.target.value)}
+                            />
+                            <div className="task-filter-option-list">
+                              {analyticsHeatPendingOptions.map((option) => (
+                                <label key={`analytics-filter-option-${analyticsHeatPendingFilterKey}-${option.id}`} className="task-filter-option">
+                                  <input
+                                    type="checkbox"
+                                    checked={isAnalyticsHeatPendingOptionSelected(option.id)}
+                                    onChange={() => toggleAnalyticsHeatPendingOption(option.id)}
+                                  />
+                                  <span>{option.label}</span>
+                                </label>
+                              ))}
+                              {analyticsHeatPendingOptions.length === 0 ? (
+                                <p className="empty">{t(lang, "taskFilterNoOptions")}</p>
+                              ) : null}
+                            </div>
+                            <button className="task-filter-clear" onClick={() => removeAnalyticsHeatFilter(analyticsHeatPendingFilterKey as AnalyticsHeatFilterKey)}>
+                              {t(lang, "taskFilterClear")}
+                            </button>
+                            <button
+                              className="inline-btn"
+                              onClick={() => {
+                                setAnalyticsHeatPendingFilterKey("");
+                                setAnalyticsHeatFilterSearch("");
+                              }}
+                            >
+                              {t(lang, "close")}
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                    <div className="task-filter-anchor">
+                      {analyticsHeatAddableFilterKeys.length > 0 ? (
+                        <select
+                          className="task-filter-add"
+                          value={analyticsHeatPendingFilterKey}
+                          onChange={(e) => {
+                            setAnalyticsHeatPendingFilterKey(e.target.value as AnalyticsHeatFilterKey | "");
+                            setAnalyticsHeatFilterSearch("");
+                          }}
+                        >
+                          <option value="">{t(lang, "taskFilterAdd")}</option>
+                          {analyticsHeatAddableFilterKeys.includes("LOCATION") ? (
+                            <option value="LOCATION">{t(lang, "analyticsFilterLocation")}</option>
+                          ) : null}
+                          {analyticsHeatAddableFilterKeys.includes("STAFF") ? (
+                            <option value="STAFF">{t(lang, "analyticsFilterStaff")}</option>
+                          ) : null}
+                        </select>
+                      ) : null}
+                      {analyticsHeatPendingFilterKey &&
+                      analyticsHeatAddableFilterKeys.includes(analyticsHeatPendingFilterKey as AnalyticsHeatFilterKey) ? (
+                        <div className="task-filter-picker">
+                          <input
+                            className="task-filter-search"
+                            placeholder={t(lang, "taskFilterSearchPlaceholder")}
+                            value={analyticsHeatFilterSearch}
+                            onChange={(e) => setAnalyticsHeatFilterSearch(e.target.value)}
+                          />
+                          <div className="task-filter-option-list">
+                            {analyticsHeatPendingOptions.map((option) => (
+                              <label key={`analytics-filter-option-${analyticsHeatPendingFilterKey}-${option.id}`} className="task-filter-option">
+                                <input
+                                  type="checkbox"
+                                  checked={isAnalyticsHeatPendingOptionSelected(option.id)}
+                                  onChange={() => toggleAnalyticsHeatPendingOption(option.id)}
+                                />
+                                <span>{option.label}</span>
+                              </label>
+                            ))}
+                            {analyticsHeatPendingOptions.length === 0 ? (
+                              <p className="empty">{t(lang, "taskFilterNoOptions")}</p>
+                            ) : null}
+                          </div>
+                          <button className="task-filter-clear" onClick={() => removeAnalyticsHeatFilter(analyticsHeatPendingFilterKey as AnalyticsHeatFilterKey)}>
+                            {t(lang, "taskFilterClear")}
+                          </button>
+                          <button
+                            className="inline-btn"
+                            onClick={() => {
+                              setAnalyticsHeatPendingFilterKey("");
+                              setAnalyticsHeatFilterSearch("");
+                            }}
+                          >
+                            {t(lang, "close")}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {analyticsHeatActiveFilters.length > 0 ? (
+                      <button className="task-filter-clear" onClick={clearAnalyticsHeatFilters}>
+                        {t(lang, "taskFilterClearAll")}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
                 <div className="analytics-heatmap-wrap">
                   <svg
                     className="analytics-heatmap"
@@ -4402,10 +4705,12 @@ export default function App() {
                       height={SHOPFLOOR_SIZE.height}
                       preserveAspectRatio="none"
                     />
-                    {locations.map((zone) => {
-                      const movement = analyticsData.zoneMovement.find((entry) => entry.zoneId === zone.id);
-                      const maxQty = Math.max(1, ...analyticsData.zoneMovement.map((entry) => entry.confirmedQty));
-                      const intensity = Math.max(0, Math.min(1, (movement?.confirmedQty ?? 0) / maxQty));
+                    {analyticsHeatVisibleZones.map((zone) => {
+                      const movement = analyticsHeatZoneMovement.find((entry) => entry.zoneId === zone.id);
+                      const intensity = Math.max(
+                        0,
+                        Math.min(1, (movement?.confirmedQty ?? 0) / analyticsHeatMaxConfirmedQty)
+                      );
                       const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
                       const paletteStart = [34, 197, 94]; // green
                       const paletteMid = [245, 158, 11]; // amber
@@ -4448,21 +4753,21 @@ export default function App() {
                     <div className="analytics-heat-ramp" />
                     <span>{t(lang, "analyticsHeatHigh")}</span>
                   </div>
-                  {analyticsData.topZoneMovement ? (
+                  {analyticsHeatTopZoneMovement ? (
                     <p className="analytics-heat-top">
                       {t(lang, "analyticsTopMovingLocation")}:
                       {" "}
                       <strong>
-                        {locations.find((zone) => zone.id === analyticsData.topZoneMovement?.zoneId)?.name ?? analyticsData.topZoneMovement.zoneId}
+                        {locationNameById.get(analyticsHeatTopZoneMovement.zoneId) ?? analyticsHeatTopZoneMovement.zoneId}
                       </strong>
                       {" "}
-                      ({analyticsData.topZoneMovement.confirmedQty} {t(lang, "unitsSuffix")})
+                      ({analyticsHeatTopZoneMovement.confirmedQty} {t(lang, "unitsSuffix")})
                     </p>
                   ) : null}
                   <div className="analytics-staff-list">
-                    {analyticsData.zoneMovement.map((entry) => (
+                    {analyticsHeatZoneMovement.map((entry) => (
                       <div key={`movement-${entry.zoneId}`} className="analytics-staff-item">
-                        <strong>{locations.find((zone) => zone.id === entry.zoneId)?.name ?? entry.zoneId}</strong>
+                        <strong>{locationNameById.get(entry.zoneId) ?? entry.zoneId}</strong>
                         <small>
                           {t(lang, "analyticsConfirmedUnits")}: {entry.confirmedQty} · {t(lang, "tasks")}: {entry.confirmedTasks}
                         </small>

@@ -125,7 +125,10 @@ export class InventoryEngine {
     this.snapshots = [...dataset.inventorySeed];
     this.rfidEvents = [];
     this.salesEvents = [];
-    this.tasks = [];
+    this.tasks = (dataset.historicalReplenishmentTasks ?? []).map((task) => ({
+      ...task,
+      sourceCandidates: task.sourceCandidates?.map((source) => ({ ...source }))
+    }));
     this.epcPresence = new Map<string, EPCPresence>();
     this.customers = new Map<string, Customer>();
     this.customerBasketItems = [];

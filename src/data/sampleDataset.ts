@@ -3,6 +3,7 @@ import type {
   EPCSkuMapping,
   InventorySnapshotByZone,
   ReplenishmentRule,
+  ReplenishmentTask,
   RFIDReadEvent,
   SalesEvent,
   StaffMember,
@@ -43,10 +44,70 @@ export interface SampleDataset {
   catalogProducts: CatalogProduct[];
   epcSkuMapping: EPCSkuMapping[];
   replenishmentRules: ReplenishmentRule[];
+  historicalReplenishmentTasks?: ReplenishmentTask[];
   inventorySeed: InventorySnapshotByZone[];
   rfidReadEvents: RFIDReadEvent[];
   salesEvents: SalesEvent[];
   staff: StaffMember[];
+}
+
+function toIso(baseMs: number, minutesOffset: number): string {
+  return new Date(baseMs + minutesOffset * 60_000).toISOString();
+}
+
+function buildHistoricalReplenishmentTasks(rules: ReplenishmentRule[], zones: Zone[]): ReplenishmentTask[] {
+  const zoneById = new Map(zones.map((zone) => [zone.id, zone]));
+  const baseMs = Date.parse("2026-02-09T06:30:00Z");
+  const tasks: ReplenishmentTask[] = [];
+  let seq = 1;
+
+  for (const rule of rules.filter((entry) => entry.isActive)) {
+    const zone = zoneById.get(rule.zoneId);
+    if (!zone) continue;
+    const sourceCandidates = [...zone.replenishmentSources]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((source) => ({
+        sourceZoneId: source.sourceZoneId,
+        sortOrder: source.sortOrder,
+        availableQty: Math.max(rule.maxQty + 10 - source.sortOrder * 2, 1)
+      }));
+    const sourceZoneId = rule.inboundSourceLocationId ?? sourceCandidates[0]?.sourceZoneId;
+    const assignedStaffId = rule.zoneId === "zone-warehouse" ? "staff-003" : "staff-002";
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      const minGap = Math.max(1, rule.maxQty - rule.minQty);
+      const deficitQty = Math.max(1, Math.min(minGap, 2 + ((seq + cycle) % 3)));
+      const confirmedQty = cycle === 1 && deficitQty > 1 ? deficitQty - 1 : deficitQty;
+      const closeReason = confirmedQty < deficitQty ? "confirmed_partial" : "confirmed";
+      const createdAt = toIso(baseMs, seq * 44 + cycle * 13);
+      const assignedAt = toIso(baseMs, seq * 44 + cycle * 13 + 8);
+      const closedAt = toIso(baseMs, seq * 44 + cycle * 13 + 32 + ((seq + cycle) % 4) * 5);
+
+      tasks.push({
+        id: `hist-task-${String(seq).padStart(3, "0")}`,
+        ruleId: rule.id,
+        zoneId: rule.zoneId,
+        skuId: rule.skuId,
+        sourceZoneId,
+        sourceCandidates: sourceCandidates.length > 0 ? sourceCandidates : undefined,
+        assignedStaffId,
+        assignedAt,
+        status: "CONFIRMED",
+        triggerQty: Math.max(0, rule.minQty - (1 + ((seq + cycle) % 2))),
+        deficitQty,
+        targetQty: rule.maxQty,
+        createdAt,
+        updatedAt: closedAt,
+        closedAt,
+        confirmedQty,
+        confirmedBy: assignedStaffId,
+        closeReason
+      });
+      seq += 1;
+    }
+  }
+
+  return tasks.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
 export const sampleDataset: SampleDataset = {
@@ -666,3 +727,8 @@ export const sampleDataset: SampleDataset = {
     }
   ]
 };
+
+sampleDataset.historicalReplenishmentTasks = buildHistoricalReplenishmentTasks(
+  sampleDataset.replenishmentRules,
+  sampleDataset.zones
+);
