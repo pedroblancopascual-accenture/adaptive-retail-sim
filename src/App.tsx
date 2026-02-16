@@ -17,6 +17,7 @@ type InventoryZoneId = string;
 type ZoneDrawerSection = "inventory" | "settings" | "rules" | "tasks";
 type ZoneScope = InventoryZoneId | "all";
 type MainContentView = "map" | "staff" | "catalog" | "analytics" | "tasks" | "rules";
+type AppDisplayMode = "admin" | "staff";
 type TaskTypeValue = "REPLENISHMENT" | "RECEIVING";
 type TaskStatusValue = "CREATED" | "ASSIGNED" | "IN_PROGRESS" | "IN_TRANSIT" | "CONFIRMED" | "REJECTED";
 type TaskHubFilterKey = "TYPE" | "DESTINATION" | "STATUS";
@@ -34,6 +35,14 @@ type CartMarkerAnimation = {
   originZoneId: string;
   startedAt: number;
 };
+type TaskAssignmentNotice = {
+  id: string;
+  taskKey: string;
+  title: string;
+  detail: string;
+  tone: "admin" | "runner";
+  startedAt: number;
+};
 type ExitMarkerAnimation = {
   id: string;
   customerId: string;
@@ -47,8 +56,14 @@ const CART_TRAVEL_MS = 4200;
 const CART_EXIT_MS = 1600;
 const REPLENISHMENT_TRAVEL_MS = 1400;
 const REPLENISHMENT_CONFIRM_FADE_MS = 1800;
+const TASK_ASSIGNMENT_FLASH_MS = 4600;
+const TASK_ASSIGNMENT_NOTICE_MS = 5600;
 const ALL_SKUS = sampleDataset.skus;
 const SKU_SOURCE_BY_ID = new Map(ALL_SKUS.map((sku) => [sku.id, sku.source]));
+
+function getUnifiedTaskKey(task: { type: TaskTypeValue; id: string }): string {
+  return `${task.type}:${task.id}`;
+}
 
 function polygonToPoints(points: Array<{ x: number; y: number }>): string {
   return points.map((p) => `${p.x},${p.y}`).join(" ");
@@ -193,6 +208,8 @@ export default function App() {
   const [showZoneDrawer, setShowZoneDrawer] = useState(false);
   const [zoneDrawerSection, setZoneDrawerSection] = useState<ZoneDrawerSection>("inventory");
   const [mainContentView, setMainContentView] = useState<MainContentView>("map");
+  const [appDisplayMode, setAppDisplayMode] = useState<AppDisplayMode>("admin");
+  const [runnerStaffId, setRunnerStaffId] = useState<string>("");
   const [receivingOrders, setReceivingOrders] = useState(api.getReceivingOrders());
   const [receivingLocations, setReceivingLocations] = useState(api.getReceivingLocations());
   const [showSalesDrawer, setShowSalesDrawer] = useState(false);
@@ -232,6 +249,8 @@ export default function App() {
   const suppressMapClickRef = useRef(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const prevTaskStatusRef = useRef<Record<string, string>>({});
+  const prevTaskAssigneeRef = useRef<Record<string, string>>({});
+  const hasTaskAssigneeSnapshotRef = useRef(false);
 
   const [ruleForm, setRuleForm] = useState<{
     skuId: string;
@@ -279,6 +298,8 @@ export default function App() {
   const [cartMarkers, setCartMarkers] = useState<Record<string, CartMarkerAnimation>>({});
   const [exitMarkers, setExitMarkers] = useState<ExitMarkerAnimation[]>([]);
   const [confirmedReplenishmentFx, setConfirmedReplenishmentFx] = useState<Record<string, number>>({});
+  const [recentAssignedTaskFx, setRecentAssignedTaskFx] = useState<Record<string, number>>({});
+  const [taskAssignmentNotices, setTaskAssignmentNotices] = useState<TaskAssignmentNotice[]>([]);
   const [animationTick, setAnimationTick] = useState(Date.now());
   const [rulesLocationFilter, setRulesLocationFilter] = useState<string>("all");
   const [rulesFormMode, setRulesFormMode] = useState<"closed" | "create" | "edit">("closed");
@@ -356,6 +377,13 @@ export default function App() {
     }
     return map;
   }, [locations, receivingLocations.external]);
+  const staffNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const member of staff) {
+      map.set(member.id, member.name);
+    }
+    return map;
+  }, [staff]);
   const sourceEditorOptions = useMemo(() => {
     if (!selectedLocation) return [];
     if (selectedLocation.isSalesLocation) {
@@ -443,6 +471,10 @@ export default function App() {
       return true;
     });
   }, [unifiedTaskRows, taskHubTypeFilters, taskHubLocationFilters, taskHubStatusFilters]);
+  const replenishmentTaskById = useMemo(
+    () => new Map(tasks.tasks.map((task) => [task.id, task] as const)),
+    [tasks.tasks]
+  );
   const taskHubDestinationLocationOptions = useMemo(() => {
     const onlyReplenishment =
       taskHubTypeFilters.length > 0 &&
@@ -905,6 +937,118 @@ export default function App() {
   );
 
   const activeStaff = useMemo(() => staff.filter((member) => member.activeShift), [staff]);
+  const runnerDefaultStaffId = useMemo(() => {
+    const activeAssociates = staff.filter((member) => member.activeShift && member.role === "ASSOCIATE");
+    if (activeAssociates[0]) return activeAssociates[0].id;
+    const anyActive = staff.find((member) => member.activeShift);
+    if (anyActive) return anyActive.id;
+    return staff[0]?.id ?? "";
+  }, [staff]);
+  useEffect(() => {
+    if (!runnerDefaultStaffId) {
+      if (runnerStaffId) setRunnerStaffId("");
+      return;
+    }
+    const exists = staff.some((member) => member.id === runnerStaffId);
+    if (!runnerStaffId || !exists) {
+      setRunnerStaffId(runnerDefaultStaffId);
+    }
+  }, [runnerDefaultStaffId, runnerStaffId, staff]);
+  const runnerStaffMember = useMemo(
+    () => staff.find((member) => member.id === runnerStaffId) ?? null,
+    [staff, runnerStaffId]
+  );
+  const effectiveMainContentView: MainContentView | "runner" =
+    appDisplayMode === "staff" ? "runner" : mainContentView;
+  const runnerAssignedTaskRows = useMemo(() => {
+    if (!runnerStaffMember) return [];
+    return unifiedTaskRows.filter(
+      (row) => row.isOpen && row.assignedStaffId === runnerStaffMember.id
+    );
+  }, [unifiedTaskRows, runnerStaffMember]);
+  const runnerTaskSummary = useMemo(() => {
+    return runnerAssignedTaskRows.reduce(
+      (acc, row) => {
+        acc.total += 1;
+        if (row.status === "CREATED" || row.status === "ASSIGNED") acc.pending += 1;
+        if (row.status === "IN_PROGRESS") acc.inProgress += 1;
+        if (row.status === "IN_TRANSIT") acc.inTransit += 1;
+        return acc;
+      },
+      { total: 0, pending: 0, inProgress: 0, inTransit: 0 }
+    );
+  }, [runnerAssignedTaskRows]);
+  const isTaskRecentlyAssigned = (taskKey: string): boolean => {
+    const startedAt = recentAssignedTaskFx[taskKey];
+    return startedAt !== undefined && animationTick - startedAt <= TASK_ASSIGNMENT_FLASH_MS;
+  };
+
+  useEffect(() => {
+    const nextAssignedByTask: Record<string, string> = {};
+    const justAssignedRows: Array<(typeof unifiedTaskRows)[number]> = [];
+
+    for (const row of unifiedTaskRows) {
+      const taskKey = getUnifiedTaskKey(row);
+      const assignedStaffId = row.isOpen ? row.assignedStaffId ?? "" : "";
+      if (!assignedStaffId) continue;
+      nextAssignedByTask[taskKey] = assignedStaffId;
+      const previousAssignedStaffId = prevTaskAssigneeRef.current[taskKey];
+      if (hasTaskAssigneeSnapshotRef.current && previousAssignedStaffId !== assignedStaffId) {
+        justAssignedRows.push(row);
+      }
+    }
+
+    prevTaskAssigneeRef.current = nextAssignedByTask;
+    if (!hasTaskAssigneeSnapshotRef.current) {
+      hasTaskAssigneeSnapshotRef.current = true;
+      return;
+    }
+    if (justAssignedRows.length === 0) return;
+
+    const now = Date.now();
+    const ownRunnerId = runnerStaffMember?.id ?? "";
+    const fxBatch: Record<string, number> = {};
+    const toastBatch: TaskAssignmentNotice[] = [];
+
+    for (const row of justAssignedRows) {
+      const taskKey = getUnifiedTaskKey(row);
+      const assignedStaffId = row.assignedStaffId;
+      if (!assignedStaffId) continue;
+      fxBatch[taskKey] = now;
+      const isOwnRunnerTask = ownRunnerId.length > 0 && assignedStaffId === ownRunnerId;
+      const shouldShowToast = appDisplayMode === "admin" || (appDisplayMode === "staff" && isOwnRunnerTask);
+      if (!shouldShowToast) continue;
+      const typeLabel =
+        row.type === "REPLENISHMENT"
+          ? t(lang, "taskFilterTypeReplenishment")
+          : t(lang, "taskFilterTypeReceiving");
+      const detailBase = t(lang, "taskAssignedToastDetail", {
+        type: typeLabel,
+        skuId: row.skuId,
+        locationName: row.locationName
+      });
+      const assigneeName = staffNameById.get(assignedStaffId) ?? assignedStaffId;
+      const detail =
+        appDisplayMode === "admin" && !isOwnRunnerTask
+          ? `${detailBase} · ${t(lang, "assigned")}: ${assigneeName}`
+          : detailBase;
+      toastBatch.push({
+        id: `${taskKey}-${now}-${toastBatch.length}`,
+        taskKey,
+        title: isOwnRunnerTask ? t(lang, "taskAssignedRunnerTitle") : t(lang, "taskAssignedAdminTitle"),
+        detail,
+        tone: isOwnRunnerTask ? "runner" : "admin",
+        startedAt: now
+      });
+    }
+
+    if (Object.keys(fxBatch).length > 0) {
+      setRecentAssignedTaskFx((current) => ({ ...current, ...fxBatch }));
+    }
+    if (toastBatch.length > 0) {
+      setTaskAssignmentNotices((current) => [...toastBatch, ...current].slice(0, 4));
+    }
+  }, [unifiedTaskRows, runnerStaffMember, appDisplayMode, staffNameById, lang]);
   const zoneOrder = useMemo(() => locations.map((zone) => zone.id as InventoryZoneId), [locations]);
   const hasMinMaxRulesByZone = useMemo(() => {
     const byZone = new Map<string, boolean>();
@@ -1410,6 +1554,21 @@ export default function App() {
       }
       return changed ? next : current;
     });
+    setRecentAssignedTaskFx((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const [taskKey, startedAt] of Object.entries(current)) {
+        if (animationTick - startedAt > TASK_ASSIGNMENT_FLASH_MS + 180) {
+          delete next[taskKey];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    setTaskAssignmentNotices((current) => {
+      const next = current.filter((entry) => animationTick - entry.startedAt <= TASK_ASSIGNMENT_NOTICE_MS);
+      return next.length === current.length ? current : next;
+    });
   }, [animationTick]);
 
   useEffect(() => {
@@ -1664,6 +1823,19 @@ export default function App() {
   function openMapMainView(): void {
     setMainContentView("map");
     setShowHeaderMenu(false);
+  }
+
+  function openAdminDisplayView(): void {
+    setAppDisplayMode("admin");
+    setShowHeaderMenu(false);
+  }
+
+  function openStaffDisplayView(): void {
+    setAppDisplayMode("staff");
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+    setShowSalesDrawer(false);
+    setShowRfidDrawer(false);
   }
 
   function zoomInMap(): void {
@@ -2245,6 +2417,29 @@ export default function App() {
     refresh();
   }
 
+  function runRunnerTaskAction(taskRow: (typeof runnerAssignedTaskRows)[number]): void {
+    if (!runnerStaffMember) return;
+    if (taskRow.type === "RECEIVING") {
+      if (taskRow.status === "IN_TRANSIT") {
+        confirmReceivingOrder(taskRow.id);
+      }
+      return;
+    }
+    const task = replenishmentTaskById.get(taskRow.id);
+    if (!task) return;
+    if (taskRow.status === "CREATED" || taskRow.status === "ASSIGNED") {
+      startTask(taskRow.id, runnerStaffMember.id);
+      return;
+    }
+    if (taskRow.status === "IN_PROGRESS") {
+      const selectedSource = taskSourceById[task.id] ?? task.sourceZoneId;
+      const selectedSourceAvailable =
+        (task.sourceCandidates ?? []).find((source) => source.sourceZoneId === selectedSource)?.availableQty ?? 0;
+      if (selectedSourceAvailable <= 0) return;
+      confirmTask(task.id, task.deficitQty, selectedSource, runnerStaffMember.id);
+    }
+  }
+
   function removeTaskHubFilter(key: TaskHubFilterKey): void {
     if (key === "TYPE") {
       setTaskHubTypeFilters([]);
@@ -2577,24 +2772,77 @@ export default function App() {
   }
 
   const breadcrumbSectionLabel =
-    mainContentView === "staff"
+    effectiveMainContentView === "runner"
+      ? t(lang, "runnerMyTasks")
+      : effectiveMainContentView === "staff"
       ? t(lang, "staff")
-      : mainContentView === "catalog"
+      : effectiveMainContentView === "catalog"
         ? t(lang, "catalog")
-        : mainContentView === "rules"
+        : effectiveMainContentView === "rules"
           ? t(lang, "rules")
-          : mainContentView === "tasks"
+          : effectiveMainContentView === "tasks"
             ? t(lang, "tasks")
-            : mainContentView === "analytics"
+            : effectiveMainContentView === "analytics"
               ? t(lang, "analytics")
               : null;
 
   return (
     <main className="page-shell">
+      {taskAssignmentNotices.length > 0 ? (
+        <section className="task-assignment-notice-stack" aria-live="polite" aria-atomic="false">
+          {taskAssignmentNotices.map((notice) => (
+            <article
+              key={notice.id}
+              className={
+                "task-assignment-notice" +
+                (notice.tone === "runner" ? " task-assignment-notice--runner" : "")
+              }
+            >
+              <strong>{notice.title}</strong>
+              <small>{notice.detail}</small>
+            </article>
+          ))}
+        </section>
+      ) : null}
+      <section className="mode-prestep-wrap" aria-label={t(lang, "viewModeLabel")}>
+        <div className="mode-prestep-dock">
+          <div className="mode-prestep-actions" role="group" aria-label={t(lang, "viewModeLabel")}>
+            <button
+              className={appDisplayMode === "admin" ? "mode-icon-btn mode-icon-btn--active" : "mode-icon-btn"}
+              onClick={openAdminDisplayView}
+              aria-label={t(lang, "admin")}
+              title={t(lang, "admin")}
+            >
+              <svg className="mode-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="4" rx="1.5" />
+                <rect x="3" y="10" width="18" height="4" rx="1.5" />
+                <rect x="3" y="15" width="18" height="4" rx="1.5" />
+                <circle cx="8" cy="7" r="1.1" />
+                <circle cx="14" cy="12" r="1.1" />
+                <circle cx="18" cy="17" r="1.1" />
+              </svg>
+              {appDisplayMode === "admin" ? <span className="mode-active-tick" aria-hidden="true">✓</span> : null}
+            </button>
+            <button
+              className={appDisplayMode === "staff" ? "mode-icon-btn mode-icon-btn--active" : "mode-icon-btn"}
+              onClick={openStaffDisplayView}
+              aria-label={t(lang, "staff")}
+              title={t(lang, "staff")}
+            >
+              <svg className="mode-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="14.5" cy="5" r="2.3" />
+                <path d="M8 21l1.8-5.6L7 12.8l2-3.1 3.3 2.1 3.6-1.2 1 2-3 1.2-1.2 2.6 2.4 2-1.1 2.6h-2l.5-1.8-2.3-2-1.4 3.8z" />
+              </svg>
+              {appDisplayMode === "staff" ? <span className="mode-active-tick" aria-hidden="true">✓</span> : null}
+            </button>
+          </div>
+        </div>
+      </section>
       <header className="hero">
         <div>
           <p className="eyebrow">{t(lang, "appEyebrow")}</p>
           <h1>{t(lang, "appTitle")}</h1>
+          <p className="subtitle">{t(lang, "legalDisclaimer")}</p>
         </div>
         <div className="hero-actions hero-actions--stack">
           <div className="lang-switch" role="group" aria-label="Language selector">
@@ -2612,70 +2860,69 @@ export default function App() {
               ))}
             </select>
           </div>
-          <div ref={headerMenuRef} className="header-menu-wrap">
-            <button
-              className="hamburger-btn"
-              aria-label="Open main menu"
-              aria-expanded={showHeaderMenu}
-              onClick={() => setShowHeaderMenu((prev) => !prev)}
-            >
-              <span />
-              <span />
-              <span />
-            </button>
-            {showHeaderMenu ? (
-              <div className="header-menu-popover">
-                <button className="header-menu-item" onClick={openStaffMainView}>
-                  {t(lang, "staff")}
-                </button>
-                <button className="header-menu-item" onClick={openAnalyticsMainView}>
-                  {t(lang, "analytics")}
-                </button>
-                <button className="header-menu-item" onClick={openCatalogMainView}>
-                  {t(lang, "catalog")}
-                </button>
-                <button className="header-menu-item header-menu-item--with-badge" onClick={openTasksMainView}>
-                  {t(lang, "tasks")}
-                  {openUnifiedTaskCount > 0 ? <span className="task-badge">{openUnifiedTaskCount}</span> : null}
-                </button>
-                <button className="header-menu-item" onClick={openRulesMainView}>
-                  {t(lang, "rules")}
-                </button>
-                <button
-                  className="header-menu-item header-menu-item--with-badge"
-                  onClick={() => {
-                    setShowHeaderMenu(false);
-                    closeZoneDrawer();
-                    setShowRfidDrawer(false);
-                    if (!showSalesDrawer) {
-                      resetSalesFormOnOpen();
-                    }
-                    setShowSalesDrawer((v) => !v);
-                  }}
-                >
-                  {t(lang, "sales")}
-                  {salesInProgressCount > 0 ? <span className="task-badge">{salesInProgressCount}</span> : null}
-                </button>
-                <button
-                  className="header-menu-item"
-                  onClick={() => {
-                    setShowHeaderMenu(false);
-                    closeZoneDrawer();
-                    setShowSalesDrawer(false);
-                    setShowRfidDrawer((v) => !v);
-                  }}
-                >
-                  RFID
-                </button>
-              </div>
-            ) : null}
-          </div>
+          {appDisplayMode === "admin" ? (
+            <div ref={headerMenuRef} className="header-menu-wrap">
+              <button
+                className="hamburger-btn"
+                aria-label="Open main menu"
+                aria-expanded={showHeaderMenu}
+                onClick={() => setShowHeaderMenu((prev) => !prev)}
+              >
+                <span />
+                <span />
+                <span />
+              </button>
+              {showHeaderMenu ? (
+                <div className="header-menu-popover">
+                  <button className="header-menu-item" onClick={openStaffMainView}>
+                    {t(lang, "staff")}
+                  </button>
+                  <button className="header-menu-item" onClick={openAnalyticsMainView}>
+                    {t(lang, "analytics")}
+                  </button>
+                  <button className="header-menu-item" onClick={openCatalogMainView}>
+                    {t(lang, "catalog")}
+                  </button>
+                  <button className="header-menu-item header-menu-item--with-badge" onClick={openTasksMainView}>
+                    {t(lang, "tasks")}
+                    {openUnifiedTaskCount > 0 ? <span className="task-badge">{openUnifiedTaskCount}</span> : null}
+                  </button>
+                  <button className="header-menu-item" onClick={openRulesMainView}>
+                    {t(lang, "rules")}
+                  </button>
+                  <button
+                    className="header-menu-item header-menu-item--with-badge"
+                    onClick={() => {
+                      setShowHeaderMenu(false);
+                      closeZoneDrawer();
+                      setShowRfidDrawer(false);
+                      if (!showSalesDrawer) {
+                        resetSalesFormOnOpen();
+                      }
+                      setShowSalesDrawer((v) => !v);
+                    }}
+                  >
+                    {t(lang, "sales")}
+                    {salesInProgressCount > 0 ? <span className="task-badge">{salesInProgressCount}</span> : null}
+                  </button>
+                  <button
+                    className="header-menu-item"
+                    onClick={() => {
+                      setShowHeaderMenu(false);
+                      closeZoneDrawer();
+                      setShowSalesDrawer(false);
+                      setShowRfidDrawer((v) => !v);
+                    }}
+                  >
+                    RFID
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </header>
-      <p className="footer-note">
-        <span>{t(lang, "legalDisclaimer")}</span>
-      </p>
-      {breadcrumbSectionLabel ? (
+      {appDisplayMode === "admin" && breadcrumbSectionLabel ? (
         <nav className="view-breadcrumbs" aria-label="Breadcrumb">
           <button type="button" className="crumb-home" onClick={openMapMainView}>
             {t(lang, "home")}
@@ -2687,17 +2934,113 @@ export default function App() {
         </nav>
       ) : null}
 
-      <section className="kpi-grid">
-        <article className="kpi-card"><span>{t(lang, "zones")}</span><strong>{totals.zones}</strong></article>
-        <article className="kpi-card"><span>{t(lang, "totalUnits")}</span><strong>{totals.totalUnits}</strong></article>
-        <article className="kpi-card"><span>{t(lang, "rfidUnits")}</span><strong>{totals.rfidUnits}</strong></article>
-        <article className="kpi-card"><span>{t(lang, "nonRfidUnits")}</span><strong>{totals.nonRfidUnits}</strong></article>
-        <article className={totals.openTasks > 0 ? "kpi-card kpi-card--alert" : "kpi-card"}><span>{t(lang, "openTasks")}</span><strong>{totals.openTasks}</strong></article>
-        <article className="kpi-card"><span>{t(lang, "lowStockZones")}</span><strong>{totals.lowStockZones}</strong></article>
-      </section>
+      {appDisplayMode === "admin" ? (
+        <section className="kpi-grid">
+          <article className="kpi-card"><span>{t(lang, "zones")}</span><strong>{totals.zones}</strong></article>
+          <article className="kpi-card"><span>{t(lang, "totalUnits")}</span><strong>{totals.totalUnits}</strong></article>
+          <article className="kpi-card"><span>{t(lang, "rfidUnits")}</span><strong>{totals.rfidUnits}</strong></article>
+          <article className="kpi-card"><span>{t(lang, "nonRfidUnits")}</span><strong>{totals.nonRfidUnits}</strong></article>
+          <article className={totals.openTasks > 0 ? "kpi-card kpi-card--alert" : "kpi-card"}><span>{t(lang, "openTasks")}</span><strong>{totals.openTasks}</strong></article>
+          <article className="kpi-card"><span>{t(lang, "lowStockZones")}</span><strong>{totals.lowStockZones}</strong></article>
+        </section>
+      ) : null}
 
       <section className="layout-grid layout-grid--single">
-        {mainContentView === "map" ? (
+        {effectiveMainContentView === "runner" ? (
+          <article className="panel map-panel">
+            <div className="panel-head">
+              <h2>{t(lang, "runnerMyTasks")}</h2>
+            </div>
+            <p className="drawer-subtitle">
+              {t(lang, "runnerLoggedAs", { name: runnerStaffMember?.name ?? t(lang, "pendingAssignment") })}
+            </p>
+            <div className="runner-summary-grid">
+              <article className="runner-summary-card">
+                <small>{t(lang, "tasks")}</small>
+                <strong>{runnerTaskSummary.total}</strong>
+              </article>
+              <article className="runner-summary-card">
+                <small>{t(lang, "runnerPending")}</small>
+                <strong>{runnerTaskSummary.pending}</strong>
+              </article>
+              <article className="runner-summary-card">
+                <small>{t(lang, "runnerInProgress")}</small>
+                <strong>{runnerTaskSummary.inProgress}</strong>
+              </article>
+              <article className="runner-summary-card">
+                <small>{t(lang, "taskFilterStatusInTransit")}</small>
+                <strong>{runnerTaskSummary.inTransit}</strong>
+              </article>
+            </div>
+            <div className="inventory-available-list">
+              {runnerAssignedTaskRows.length === 0 ? (
+                <p className="empty">{t(lang, "runnerNoAssignedTasks")}</p>
+              ) : (
+                runnerAssignedTaskRows.map((row) => {
+                  const taskKey = getUnifiedTaskKey(row);
+                  const taskTypeLabel =
+                    row.type === "REPLENISHMENT"
+                      ? t(lang, "taskFilterTypeReplenishment")
+                      : t(lang, "taskFilterTypeReceiving");
+                  const taskStatusLabel =
+                    row.type === "REPLENISHMENT"
+                      ? row.status === "CREATED" || row.status === "ASSIGNED"
+                        ? t(lang, "replenishmentPendingAcceptance")
+                        : row.status === "IN_PROGRESS"
+                          ? t(lang, "replenishmentInProgress")
+                          : row.status === "CONFIRMED"
+                            ? t(lang, "replenishmentFinished")
+                            : taskStatusLabelById.get(row.status) ?? row.status
+                      : taskStatusLabelById.get(row.status) ?? row.status;
+                  const primaryActionLabel =
+                    row.type === "REPLENISHMENT"
+                      ? row.status === "IN_PROGRESS"
+                        ? t(lang, "finish")
+                        : t(lang, "start")
+                      : t(lang, "confirm");
+                  const replenTask = row.type === "REPLENISHMENT" ? replenishmentTaskById.get(row.id) : null;
+                  const selectedSource = replenTask ? taskSourceById[replenTask.id] ?? replenTask.sourceZoneId : undefined;
+                  const sourceAvailable =
+                    replenTask && selectedSource
+                      ? (replenTask.sourceCandidates ?? []).find((source) => source.sourceZoneId === selectedSource)?.availableQty ?? 0
+                      : 1;
+                  const isActionDisabled =
+                    row.type === "REPLENISHMENT"
+                      ? row.status !== "CREATED" &&
+                        row.status !== "ASSIGNED" &&
+                        (row.status !== "IN_PROGRESS" || sourceAvailable <= 0)
+                      : row.status !== "IN_TRANSIT";
+                  return (
+                    <div
+                      key={`runner-task-${row.type}-${row.id}`}
+                      className={
+                        "inventory-available-item runner-task-item" +
+                        (isTaskRecentlyAssigned(taskKey) ? " task-assigned-flash" : "")
+                      }
+                    >
+                      <div>
+                        <strong>{row.skuId}</strong>
+                        <small>{taskTypeLabel} · {taskStatusLabel}</small>
+                        <small>{t(lang, "taskFilterDestinationLabel")}: {row.locationName}</small>
+                        <small>{t(lang, "source")}: {row.sourceLabel}</small>
+                        <small>{t(lang, "assigned")}: {row.assignedStaffId ?? "-"}</small>
+                      </div>
+                      <div className="staff-item-actions">
+                        <button
+                          className="action-btn"
+                          disabled={isActionDisabled}
+                          onClick={() => runRunnerTaskAction(row)}
+                        >
+                          {primaryActionLabel}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </article>
+        ) : effectiveMainContentView === "map" ? (
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "shopfloorDigitalTwin")}</h2>
@@ -3181,7 +3524,7 @@ export default function App() {
             </svg>
             </div>
           </article>
-        ) : mainContentView === "staff" ? (
+        ) : effectiveMainContentView === "staff" ? (
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "staff")}</h2>
@@ -3243,7 +3586,7 @@ export default function App() {
               ))}
             </div>
           </article>
-        ) : mainContentView === "catalog" ? (
+        ) : effectiveMainContentView === "catalog" ? (
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "catalogTitle")}</h2>
@@ -3497,7 +3840,7 @@ export default function App() {
               ))}
             </div>
           </article>
-        ) : mainContentView === "rules" ? (
+        ) : effectiveMainContentView === "rules" ? (
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "rulesHubTitle")}</h2>
@@ -3596,7 +3939,7 @@ export default function App() {
               </table>
             </div>
           </article>
-        ) : mainContentView === "tasks" ? (
+        ) : effectiveMainContentView === "tasks" ? (
           <article className="panel map-panel">
             <div className="panel-head">
               <h2>{t(lang, "tasks")}</h2>
@@ -3732,40 +4075,49 @@ export default function App() {
                 {filteredUnifiedTaskRows.length === 0 ? (
                   <p className="empty">No hay tasks para los filtros seleccionados.</p>
                 ) : (
-                  filteredUnifiedTaskRows.map((row) => (
-                    <div key={`hub-task-${row.type}-${row.id}`} className="inventory-available-item">
-                      <div>
-                        <strong>{row.id} · {row.skuId}</strong>
-                        <small>
-                          type={row.type} · location={row.locationName} · source={row.sourceLabel} · qty={row.qtyLabel}
-                        </small>
-                        <small>
-                          assigned={row.assignedStaffId ?? t(lang, "pendingAssignment")} · status={
-                            row.type === "REPLENISHMENT"
-                              ? row.status === "CREATED" || row.status === "ASSIGNED"
-                                ? t(lang, "replenishmentPendingAcceptance")
-                                : row.status === "IN_PROGRESS"
-                                  ? t(lang, "replenishmentInProgress")
-                                  : row.status === "CONFIRMED"
-                                    ? t(lang, "replenishmentFinished")
-                                    : taskStatusLabelById.get(row.status) ?? row.status
-                              : taskStatusLabelById.get(row.status) ?? row.status
-                          } · {row.createdAt}
-                        </small>
-                      </div>
-                      {row.type === "RECEIVING" && row.status === "IN_TRANSIT" ? (
-                        <div className="staff-item-actions">
-                          <button
-                            className="action-btn"
-                            disabled={!row.assignedStaffId}
-                            onClick={() => confirmReceivingOrder(row.id)}
-                          >
-                            Confirmar recepción
-                          </button>
+                  filteredUnifiedTaskRows.map((row) => {
+                    const taskKey = getUnifiedTaskKey(row);
+                    return (
+                      <div
+                        key={`hub-task-${row.type}-${row.id}`}
+                        className={
+                          "inventory-available-item" +
+                          (isTaskRecentlyAssigned(taskKey) ? " task-assigned-flash" : "")
+                        }
+                      >
+                        <div>
+                          <strong>{row.id} · {row.skuId}</strong>
+                          <small>
+                            type={row.type} · location={row.locationName} · source={row.sourceLabel} · qty={row.qtyLabel}
+                          </small>
+                          <small>
+                            assigned={row.assignedStaffId ?? t(lang, "pendingAssignment")} · status={
+                              row.type === "REPLENISHMENT"
+                                ? row.status === "CREATED" || row.status === "ASSIGNED"
+                                  ? t(lang, "replenishmentPendingAcceptance")
+                                  : row.status === "IN_PROGRESS"
+                                    ? t(lang, "replenishmentInProgress")
+                                    : row.status === "CONFIRMED"
+                                      ? t(lang, "replenishmentFinished")
+                                      : taskStatusLabelById.get(row.status) ?? row.status
+                                : taskStatusLabelById.get(row.status) ?? row.status
+                            } · {row.createdAt}
+                          </small>
                         </div>
-                      ) : null}
-                    </div>
-                  ))
+                        {row.type === "RECEIVING" && row.status === "IN_TRANSIT" ? (
+                          <div className="staff-item-actions">
+                            <button
+                              className="action-btn"
+                              disabled={!row.assignedStaffId}
+                              onClick={() => confirmReceivingOrder(row.id)}
+                            >
+                              Confirmar recepción
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -3963,26 +4315,28 @@ export default function App() {
         )}
       </section>
 
-      <section className="panel">
-        <article>
-          <h2>{t(lang, "storeFlowTimeline")}</h2>
-          <div className="timeline timeline--full">
-            {flow.length === 0 ? (
-              <p className="empty">{t(lang, "noActionsYet")}</p>
-            ) : (
-              flow.map((event) => (
-                <div className="timeline-item" key={event.id}>
-                  <strong>{event.title}</strong>
-                  <small>{event.at}</small>
-                  <p>{event.details}</p>
-                </div>
-              ))
-            )}
-          </div>
-        </article>
-      </section>
+      {appDisplayMode === "admin" ? (
+        <section className="panel">
+          <article>
+            <h2>{t(lang, "storeFlowTimeline")}</h2>
+            <div className="timeline timeline--full">
+              {flow.length === 0 ? (
+                <p className="empty">{t(lang, "noActionsYet")}</p>
+              ) : (
+                flow.map((event) => (
+                  <div className="timeline-item" key={event.id}>
+                    <strong>{event.title}</strong>
+                    <small>{event.at}</small>
+                    <p>{event.details}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </article>
+        </section>
+      ) : null}
 
-      {mainContentView === "map" ? (
+      {effectiveMainContentView === "map" ? (
       <aside className={showZoneDrawer ? "side-drawer side-drawer--open side-drawer--zone" : "side-drawer side-drawer--zone"}>
         <div className="side-drawer-head">
           <h3>{t(lang, "zonePanel")}</h3>
@@ -4456,6 +4810,8 @@ export default function App() {
       </aside>
       ) : null}
 
+      {appDisplayMode === "admin" ? (
+      <>
       <aside className={showRfidDrawer ? "side-drawer side-drawer--open side-drawer--rfid" : "side-drawer side-drawer--rfid"}>
         <div className="side-drawer-head">
           <h3>RFID Pulse & Data</h3>
@@ -4667,6 +5023,8 @@ export default function App() {
           </div>
         </details>
       </aside>
+      </>
+      ) : null}
     </main>
   );
 }
