@@ -215,6 +215,8 @@ export default function App() {
   const [showSalesDrawer, setShowSalesDrawer] = useState(false);
   const [showRfidDrawer, setShowRfidDrawer] = useState(false);
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+  const [showSessionMenu, setShowSessionMenu] = useState(false);
+  const [signedInStaffId, setSignedInStaffId] = useState<string>("");
   const [taskSourceById, setTaskSourceById] = useState<Record<string, string>>({});
   const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
   const [mapEditMode, setMapEditMode] = useState(false);
@@ -248,6 +250,7 @@ export default function App() {
   const mapViewportRef = useRef<HTMLDivElement | null>(null);
   const suppressMapClickRef = useRef(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const prevTaskStatusRef = useRef<Record<string, string>>({});
   const prevTaskAssigneeRef = useRef<Record<string, string>>({});
   const hasTaskAssigneeSnapshotRef = useRef(false);
@@ -937,13 +940,16 @@ export default function App() {
   );
 
   const activeStaff = useMemo(() => staff.filter((member) => member.activeShift), [staff]);
+  const activeRunnerStaff = useMemo(
+    () => staff.filter((member) => member.activeShift && member.role === "ASSOCIATE"),
+    [staff]
+  );
   const runnerDefaultStaffId = useMemo(() => {
-    const activeAssociates = staff.filter((member) => member.activeShift && member.role === "ASSOCIATE");
-    if (activeAssociates[0]) return activeAssociates[0].id;
+    if (activeRunnerStaff[0]) return activeRunnerStaff[0].id;
     const anyActive = staff.find((member) => member.activeShift);
     if (anyActive) return anyActive.id;
     return staff[0]?.id ?? "";
-  }, [staff]);
+  }, [activeRunnerStaff, staff]);
   useEffect(() => {
     if (!runnerDefaultStaffId) {
       if (runnerStaffId) setRunnerStaffId("");
@@ -958,12 +964,48 @@ export default function App() {
     () => staff.find((member) => member.id === runnerStaffId) ?? null,
     [staff, runnerStaffId]
   );
+  const managerSessionUser = useMemo(
+    () =>
+      staff.find((member) => member.activeShift && member.role === "SUPERVISOR") ??
+      staff.find((member) => member.activeShift) ??
+      staff[0] ??
+      null,
+    [staff]
+  );
+  const signedInStaffMember = useMemo(() => {
+    if (!signedInStaffId) return null;
+    return (
+      staff.find((member) => member.id === signedInStaffId && member.activeShift && member.role === "ASSOCIATE") ??
+      null
+    );
+  }, [signedInStaffId, staff]);
+  useEffect(() => {
+    if (!signedInStaffId) return;
+    if (!signedInStaffMember) {
+      setSignedInStaffId("");
+    }
+  }, [signedInStaffId, signedInStaffMember]);
+  const currentSessionUser = useMemo(() => {
+    if (signedInStaffMember) return signedInStaffMember;
+    if (appDisplayMode === "staff" && runnerStaffMember) return runnerStaffMember;
+    return managerSessionUser;
+  }, [appDisplayMode, managerSessionUser, runnerStaffMember, signedInStaffMember]);
+  const currentSessionRoleLabel = currentSessionUser
+    ? currentSessionUser.role === "SUPERVISOR"
+      ? t(lang, "accountRoleSupervisor")
+      : t(lang, "accountRoleAssociate")
+    : "";
   const effectiveMainContentView: MainContentView | "runner" =
     appDisplayMode === "staff" ? "runner" : mainContentView;
   const runnerAssignedTaskRows = useMemo(() => {
     if (!runnerStaffMember) return [];
     return unifiedTaskRows.filter(
-      (row) => row.isOpen && row.assignedStaffId === runnerStaffMember.id
+      (row) => {
+        if (!row.isOpen) return false;
+        if (row.assignedStaffId === runnerStaffMember.id) return true;
+        if (row.assignedStaffId) return false;
+        return runnerStaffMember.scopeAllZones || runnerStaffMember.zoneScopeZoneIds.includes(row.locationId);
+      }
     );
   }, [unifiedTaskRows, runnerStaffMember]);
   const runnerTaskSummary = useMemo(() => {
@@ -1722,15 +1764,17 @@ export default function App() {
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent): void {
-      if (!showHeaderMenu) return;
+      if (!showHeaderMenu && !showSessionMenu) return;
       const target = event.target as Node | null;
-      if (headerMenuRef.current && target && !headerMenuRef.current.contains(target)) {
-        setShowHeaderMenu(false);
-      }
+      if (!target) return;
+      if (headerMenuRef.current?.contains(target)) return;
+      if (sessionMenuRef.current?.contains(target)) return;
+      setShowHeaderMenu(false);
+      setShowSessionMenu(false);
     }
     window.addEventListener("mousedown", onPointerDown);
     return () => window.removeEventListener("mousedown", onPointerDown);
-  }, [showHeaderMenu]);
+  }, [showHeaderMenu, showSessionMenu]);
 
   function refresh(zone: ZoneScope = selectedZone): void {
     setDashboard(api.getInventoryZones());
@@ -1827,15 +1871,53 @@ export default function App() {
 
   function openAdminDisplayView(): void {
     setAppDisplayMode("admin");
+    setSignedInStaffId("");
     setShowHeaderMenu(false);
+    setShowSessionMenu(false);
   }
 
   function openStaffDisplayView(): void {
     setAppDisplayMode("staff");
     setShowHeaderMenu(false);
+    setShowSessionMenu(false);
     closeZoneDrawer();
     setShowSalesDrawer(false);
     setShowRfidDrawer(false);
+  }
+
+  function signInAsStaff(staffId: string): void {
+    const selected = activeRunnerStaff.find((member) => member.id === staffId);
+    if (!selected) return;
+    setRunnerStaffId(selected.id);
+    setSignedInStaffId(selected.id);
+    setAppDisplayMode("staff");
+    setShowSessionMenu(false);
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+    setShowSalesDrawer(false);
+    setShowRfidDrawer(false);
+  }
+
+  function signInAsManager(): void {
+    setSignedInStaffId("");
+    setAppDisplayMode("admin");
+    setShowSessionMenu(false);
+    setShowHeaderMenu(false);
+    closeZoneDrawer();
+    setShowSalesDrawer(false);
+    setShowRfidDrawer(false);
+  }
+
+  function signOutSession(): void {
+    setShowSessionMenu(false);
+    setShowHeaderMenu(false);
+    setSignedInStaffId("");
+    setMainContentView("map");
+    closeZoneDrawer();
+    setShowSalesDrawer(false);
+    setShowRfidDrawer(false);
+    setAppDisplayMode("admin");
+    setRunnerStaffId(runnerDefaultStaffId);
   }
 
   function zoomInMap(): void {
@@ -2845,20 +2927,89 @@ export default function App() {
           <p className="subtitle">{t(lang, "legalDisclaimer")}</p>
         </div>
         <div className="hero-actions hero-actions--stack">
-          <div className="lang-switch" role="group" aria-label="Language selector">
-            <label htmlFor="lang-select" className="lang-switch-label">Lang</label>
-            <select
-              id="lang-select"
-              className="lang-select"
-              value={lang}
-              onChange={(e) => setLang(e.target.value as Lang)}
-            >
-              {(["ca", "es", "en"] as Lang[]).map((option) => (
-                <option key={option} value={option}>
-                  {LANG_FLAGS[option]} - {LANG_LABELS[option]}
-                </option>
-              ))}
-            </select>
+          <div className="lang-switch">
+            <div className="lang-switch-row" role="group" aria-label="Language selector">
+              <label htmlFor="lang-select" className="lang-switch-label">Lang</label>
+              <select
+                id="lang-select"
+                className="lang-select"
+                value={lang}
+                onChange={(e) => setLang(e.target.value as Lang)}
+              >
+                {(["ca", "es", "en"] as Lang[]).map((option) => (
+                  <option key={option} value={option}>
+                    {LANG_FLAGS[option]} - {LANG_LABELS[option]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {currentSessionUser ? (
+              <div ref={sessionMenuRef} className="session-chip-wrap">
+                <button
+                  type="button"
+                  className="session-chip-btn"
+                  aria-expanded={showSessionMenu}
+                  aria-label={t(lang, "accountMenuLabel")}
+                  onClick={() => {
+                    setShowHeaderMenu(false);
+                    setShowSessionMenu((prev) => !prev);
+                  }}
+                >
+                  <span className="session-chip-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <circle cx="12" cy="8" r="3.4" />
+                      <path d="M5.6 19.4a6.4 6.4 0 0 1 12.8 0" />
+                    </svg>
+                  </span>
+                  <span className="session-chip-text">
+                    <span className="session-chip-name">{currentSessionUser.name}</span>
+                    <span className="session-chip-role">{currentSessionRoleLabel}</span>
+                  </span>
+                </button>
+                {showSessionMenu ? (
+                  <div className="session-chip-popover">
+                    <p className="session-chip-section-title">{t(lang, "accountSignInAs")}</p>
+                    <div className="session-chip-login-list">
+                      <button
+                        type="button"
+                        className={appDisplayMode === "admin" ? "session-chip-login-item session-chip-login-item--active" : "session-chip-login-item"}
+                        onClick={signInAsManager}
+                      >
+                        <span className="session-chip-login-name">
+                          {managerSessionUser?.name ?? t(lang, "admin")}
+                        </span>
+                        {appDisplayMode === "admin" ? <span className="session-chip-login-check">✓</span> : null}
+                      </button>
+                      {activeRunnerStaff.map((member) => {
+                        const isActive = appDisplayMode === "staff" && member.id === runnerStaffId;
+                        return (
+                          <button
+                            key={member.id}
+                            type="button"
+                            className={isActive ? "session-chip-login-item session-chip-login-item--active" : "session-chip-login-item"}
+                            onClick={() => signInAsStaff(member.id)}
+                          >
+                            <span className="session-chip-login-name">{member.name}</span>
+                            {isActive ? <span className="session-chip-login-check">✓</span> : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {activeRunnerStaff.length === 0 ? (
+                      <p className="session-chip-empty">{t(lang, "accountNoActiveRunners")}</p>
+                    ) : null}
+                    <div className="session-chip-divider" />
+                    <button
+                      type="button"
+                      className="session-chip-action"
+                      onClick={signOutSession}
+                    >
+                      {t(lang, "accountSignOut")}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           {appDisplayMode === "admin" ? (
             <div ref={headerMenuRef} className="header-menu-wrap">
@@ -2866,7 +3017,10 @@ export default function App() {
                 className="hamburger-btn"
                 aria-label="Open main menu"
                 aria-expanded={showHeaderMenu}
-                onClick={() => setShowHeaderMenu((prev) => !prev)}
+                onClick={() => {
+                  setShowSessionMenu(false);
+                  setShowHeaderMenu((prev) => !prev);
+                }}
               >
                 <span />
                 <span />
@@ -2978,6 +3132,11 @@ export default function App() {
               ) : (
                 runnerAssignedTaskRows.map((row) => {
                   const taskKey = getUnifiedTaskKey(row);
+                  const isOutOfScopeAssignedTask =
+                    !!runnerStaffMember &&
+                    row.assignedStaffId === runnerStaffMember.id &&
+                    !runnerStaffMember.scopeAllZones &&
+                    !runnerStaffMember.zoneScopeZoneIds.includes(row.locationId);
                   const taskTypeLabel =
                     row.type === "REPLENISHMENT"
                       ? t(lang, "taskFilterTypeReplenishment")
@@ -3020,6 +3179,11 @@ export default function App() {
                     >
                       <div>
                         <strong>{row.skuId}</strong>
+                        {isOutOfScopeAssignedTask ? (
+                          <small className="runner-task-scope-warning">
+                            {t(lang, "runnerOutOfScopeAssigned")}
+                          </small>
+                        ) : null}
                         <small>{taskTypeLabel} · {taskStatusLabel}</small>
                         <small>{t(lang, "taskFilterDestinationLabel")}: {row.locationName}</small>
                         <small>{t(lang, "source")}: {row.sourceLabel}</small>

@@ -742,11 +742,13 @@ export class InventoryEngine {
   }
 
   getTasks(status?: TaskStatus): ReplenishmentTask[] {
+    this.autoAssignPendingTasks(this.nowCursor);
     if (!status) return this.tasks;
     return this.tasks.filter((t) => t.status === status);
   }
 
   getReceivingOrders(status?: ReceivingOrder["status"]): ReceivingOrder[] {
+    this.autoAssignPendingReceivingOrders(this.nowCursor);
     if (!status) return [...this.receivingOrders];
     return this.receivingOrders.filter((order) => order.status === status);
   }
@@ -1121,7 +1123,12 @@ export class InventoryEngine {
     if (task.status === "IN_PROGRESS") return { status: "already_in_progress", task };
     const member = this.staff.find((entry) => entry.id === payload.staffId && entry.activeShift);
     if (!member) return { status: "staff_not_active" };
-    if (!member.scopeAllZones && !member.zoneScopeZoneIds.includes(task.zoneId)) {
+    const inScope = member.scopeAllZones || member.zoneScopeZoneIds.includes(task.zoneId);
+    const outOfScopeFallbackAssigned =
+      !inScope &&
+      task.assignedStaffId === member.id &&
+      !this.hasAnyAssignableStaffInScope(task.zoneId);
+    if (!inScope && !outOfScopeFallbackAssigned) {
       return { status: "staff_not_eligible_for_zone" };
     }
     if (task.assignedStaffId && task.assignedStaffId !== member.id) {
@@ -1646,6 +1653,20 @@ export class InventoryEngine {
     });
   }
 
+  private getAssignableActiveStaff(): StaffMember[] {
+    const activeAssociates = this.staff.filter(
+      (member) => member.activeShift && member.role === "ASSOCIATE"
+    );
+    if (activeAssociates.length > 0) return activeAssociates;
+    return this.staff.filter((member) => member.activeShift);
+  }
+
+  private hasAnyAssignableStaffInScope(zoneId: string): boolean {
+    return this.getAssignableActiveStaff().some(
+      (member) => member.scopeAllZones || member.zoneScopeZoneIds.includes(zoneId)
+    );
+  }
+
   private autoAssignPendingTasks(at: string): void {
     const pendingTasks = this.tasks
       .filter((task) => task.status === "CREATED" && !task.assignedStaffId)
@@ -1653,27 +1674,52 @@ export class InventoryEngine {
 
     if (pendingTasks.length === 0) return;
 
-    const busyStaff = this.getBusyStaffIds();
+    const availableStaff = this.getAssignableActiveStaff();
+    if (availableStaff.length === 0) return;
 
-    const availableStaff = this.staff.filter(
-      (member) => member.activeShift && !busyStaff.has(member.id)
-    );
+    const loadByStaff = new Map<string, number>();
+    for (const member of availableStaff) {
+      loadByStaff.set(member.id, 0);
+    }
+    for (const task of this.tasks) {
+      if (!taskIsOpen(task.status) || !task.assignedStaffId) continue;
+      if (!loadByStaff.has(task.assignedStaffId)) continue;
+      loadByStaff.set(task.assignedStaffId, (loadByStaff.get(task.assignedStaffId) ?? 0) + 1);
+    }
+    for (const order of this.receivingOrders) {
+      if (order.status !== "IN_TRANSIT" || !order.assignedStaffId) continue;
+      if (!loadByStaff.has(order.assignedStaffId)) continue;
+      loadByStaff.set(order.assignedStaffId, (loadByStaff.get(order.assignedStaffId) ?? 0) + 1);
+    }
 
-    const remainingStaff = [...availableStaff];
     for (const task of pendingTasks) {
-      const idx = remainingStaff.findIndex(
+      const eligibleByScope = availableStaff.filter(
         (member) =>
           member.scopeAllZones || member.zoneScopeZoneIds.includes(task.zoneId)
       );
-      if (idx === -1) continue;
-      const member = remainingStaff[idx];
-      remainingStaff.splice(idx, 1);
+      const assignPool = eligibleByScope.length > 0 ? eligibleByScope : availableStaff;
+      const member = assignPool.reduce((selected, candidate) => {
+        const selectedLoad = loadByStaff.get(selected.id) ?? 0;
+        const candidateLoad = loadByStaff.get(candidate.id) ?? 0;
+        if (candidateLoad === selectedLoad) {
+          return candidate.id < selected.id ? candidate : selected;
+        }
+        return candidateLoad < selectedLoad ? candidate : selected;
+      });
       task.assignedStaffId = member.id;
       task.assignedAt = at;
       task.status = "ASSIGNED";
       task.updatedAt = at;
+      loadByStaff.set(member.id, (loadByStaff.get(member.id) ?? 0) + 1);
       this.nowCursor = at;
-      this.pushTaskAudit(task.id, "ASSIGNED", member.id, `auto_assigned_to=${member.name}`);
+      this.pushTaskAudit(
+        task.id,
+        "ASSIGNED",
+        member.id,
+        eligibleByScope.length > 0
+          ? `auto_assigned_to=${member.name}`
+          : `auto_assigned_fallback_to=${member.name} reason=no_scope_match`
+      );
     }
   }
 
@@ -1684,22 +1730,41 @@ export class InventoryEngine {
 
     if (pendingOrders.length === 0) return;
 
-    const busyStaff = this.getBusyStaffIds();
-    const availableStaff = this.staff.filter(
-      (member) => member.activeShift && !busyStaff.has(member.id)
-    );
+    const availableStaff = this.getAssignableActiveStaff();
+    if (availableStaff.length === 0) return;
 
-    const remainingStaff = [...availableStaff];
+    const loadByStaff = new Map<string, number>();
+    for (const member of availableStaff) {
+      loadByStaff.set(member.id, 0);
+    }
+    for (const task of this.tasks) {
+      if (!taskIsOpen(task.status) || !task.assignedStaffId) continue;
+      if (!loadByStaff.has(task.assignedStaffId)) continue;
+      loadByStaff.set(task.assignedStaffId, (loadByStaff.get(task.assignedStaffId) ?? 0) + 1);
+    }
+    for (const order of this.receivingOrders) {
+      if (order.status !== "IN_TRANSIT" || !order.assignedStaffId) continue;
+      if (!loadByStaff.has(order.assignedStaffId)) continue;
+      loadByStaff.set(order.assignedStaffId, (loadByStaff.get(order.assignedStaffId) ?? 0) + 1);
+    }
+
     for (const order of pendingOrders) {
-      const idx = remainingStaff.findIndex((member) =>
+      const eligibleByScope = availableStaff.filter((member) =>
         member.scopeAllZones || member.zoneScopeZoneIds.includes(order.destinationZoneId)
       );
-      if (idx === -1) continue;
-      const member = remainingStaff[idx];
-      remainingStaff.splice(idx, 1);
+      const assignPool = eligibleByScope.length > 0 ? eligibleByScope : availableStaff;
+      const member = assignPool.reduce((selected, candidate) => {
+        const selectedLoad = loadByStaff.get(selected.id) ?? 0;
+        const candidateLoad = loadByStaff.get(candidate.id) ?? 0;
+        if (candidateLoad === selectedLoad) {
+          return candidate.id < selected.id ? candidate : selected;
+        }
+        return candidateLoad < selectedLoad ? candidate : selected;
+      });
       order.assignedStaffId = member.id;
       order.assignedAt = at;
       order.updatedAt = at;
+      loadByStaff.set(member.id, (loadByStaff.get(member.id) ?? 0) + 1);
       this.nowCursor = at;
     }
   }

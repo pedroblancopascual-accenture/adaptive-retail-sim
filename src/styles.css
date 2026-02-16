@@ -1309,6 +1309,12 @@ th {
   position: absolute;
   top: 12px;
   right: 12px;
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.lang-switch-row {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -1328,6 +1334,165 @@ th {
   font-family: inherit;
   font-weight: 600;
   min-width: 134px;
+}
+
+.session-chip-wrap {
+  position: relative;
+}
+
+.session-chip-btn {
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  min-height: 34px;
+  padding: 5px 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: inherit;
+  text-align: left;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.session-chip-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(113, 143, 184, 0.5);
+  display: grid;
+  place-items: center;
+  color: #3a4d6e;
+}
+
+.session-chip-icon svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.session-chip-text {
+  display: grid;
+  gap: 1px;
+}
+
+.session-chip-name {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.session-chip-role {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.session-chip-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  border: 1px solid var(--panel-line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 14px 26px rgba(12, 20, 34, 0.2);
+  padding: 6px;
+  z-index: 90;
+  min-width: 198px;
+  max-width: min(86vw, 260px);
+  display: grid;
+  gap: 6px;
+}
+
+.session-chip-section-title {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #70839f;
+  padding: 2px 4px 0;
+}
+
+.session-chip-login-list {
+  display: grid;
+  gap: 5px;
+}
+
+.session-chip-login-item {
+  border: 1px solid rgba(113, 143, 184, 0.34);
+  border-radius: 8px;
+  min-height: 30px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--ink);
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-chip-login-item:hover {
+  border-color: rgba(109, 239, 207, 0.52);
+}
+
+.session-chip-login-item--active {
+  border-color: rgba(30, 171, 88, 0.72);
+}
+
+.session-chip-login-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-chip-login-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: rgba(30, 171, 88, 0.18);
+  color: #11823d;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+.session-chip-empty {
+  margin: 0;
+  font-size: 12px;
+  color: #6a7a92;
+  padding: 0 4px;
+}
+
+.session-chip-divider {
+  height: 1px;
+  background: rgba(165, 186, 214, 0.54);
+  margin: 1px 2px;
+}
+
+.session-chip-action {
+  border: 1px solid rgba(113, 143, 184, 0.36);
+  border-radius: 8px;
+  min-height: 32px;
+  padding: 6px 10px;
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-chip-action:hover {
+  border-color: rgba(109, 239, 207, 0.45);
 }
 
 .header-action-row {
@@ -1438,6 +1603,19 @@ th {
 
 .runner-task-item small {
   display: block;
+}
+
+.runner-task-scope-warning {
+  width: fit-content;
+  margin: 2px 0 1px;
+  padding: 2px 7px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 999px;
+  background: rgba(255, 244, 218, 0.8);
+  color: #92400e;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .layout-grid--single {
